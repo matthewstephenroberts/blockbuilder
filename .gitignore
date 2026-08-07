@@ -1,0 +1,22 @@
+# Node / web
+node_modules/
+dist/
+.vite/
+*.local
+
+# GitHub Pages — allow pages/app/ (built web app) but ignore pages/app/node_modules
+pages/app/node_modules/
+!pages/app/
+
+# Electron desktop wrapper
+electron/node_modules/
+electron/web-dist/
+electron/release/
+
+# Editor / OS
+.vscode/
+.DS_Store
+*.log
+
+# Claude IDE (local development configs)
+.claude/

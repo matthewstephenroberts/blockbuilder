@@ -1,0 +1,39 @@
+{
+  "name": "blockbuilder",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "electron": "npm run build && npm --prefix electron start",
+    "electron-dev": "npm run build && BLOCKBUILDER_DEV_SERVER_URL=http://localhost:5174 npm --prefix electron run dev",
+    "electron-dev:devtools": "npm run dev &  npm --prefix electron run dev:devtools",
+    "electron-dist": "npm run build && npm --prefix electron run dist",
+    "electron-dist:mac": "npm run build && npm --prefix electron run dist -- --mac",
+    "electron-dist:win": "npm run build && npm --prefix electron run dist -- --win",
+    "electron-dist:linux": "npm run build && npm --prefix electron run dist -- --linux"
+  },
+  "dependencies": {
+    "@fontsource/fredoka": "^5.3.0",
+    "@fontsource/nunito": "^5.3.0",
+    "@react-three/drei": "^9.114.0",
+    "@react-three/fiber": "^8.17.10",
+    "lucide-react": "^0.462.0",
+    "manifold-3d": "^3.5.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.169.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

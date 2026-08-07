@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlockBuilder - Parametric Technic Tile &amp; Brick Designer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #e7ecf3;
+            background: radial-gradient(1200px 600px at 70% -10%, #182233 0%, #0e1116 55%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 720px;
+            background: #151a22;
+            border: 1px solid #262d3a;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+            padding: 60px 40px;
+            text-align: center;
+        }
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 15px;
+        }
+        .subtitle {
+            font-size: 1.2em;
+            color: #9aa4b2;
+            margin-bottom: 30px;
+        }
+        .description {
+            font-size: 1em;
+            color: #c3cad6;
+            margin-bottom: 40px;
+            line-height: 1.8;
+        }
+        .cta-button {
+            display: inline-block;
+            padding: 15px 40px;
+            margin: 10px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 1em;
+            transition: all 0.2s ease;
+            border: 2px solid transparent;
+        }
+        .cta-primary {
+            background: #4ea8ff;
+            color: #0e1116;
+        }
+        .cta-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(78, 168, 255, 0.35);
+        }
+        .cta-secondary {
+            background: transparent;
+            color: #4ea8ff;
+            border: 2px solid #4ea8ff;
+        }
+        .cta-secondary:hover {
+            background: rgba(78, 168, 255, 0.1);
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧱 BlockBuilder</h1>
+        <p class="subtitle">Parametric Technic Tile &amp; Brick Designer</p>
+        <p class="description">
+            Design Technic-compatible parts in the browser — paint a grid of beams, pins,
+            axles, and connectors, then export a print-ready STL. Runs entirely client-side.
+        </p>
+        <a class="cta-button cta-primary" href="./app/">Open BlockBuilder</a>
+        <a class="cta-button cta-secondary" href="https://github.com/matthewstephenroberts/blockbuilder">View on GitHub</a>
+    </div>
+</body>
+</html>

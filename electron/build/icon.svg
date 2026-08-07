@@ -1,0 +1,38 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="256" height="256" fill="#0f1419" rx="60"/>
+
+  <!-- Outer brick frame -->
+  <rect x="40" y="60" width="176" height="136" fill="none" stroke="#60a5fa" stroke-width="3" rx="8"/>
+
+  <!-- Brick grid pattern -->
+  <g fill="#3b82f6" opacity="0.8">
+    <!-- First row -->
+    <rect x="50" y="70" width="38" height="38" rx="4"/>
+    <rect x="95" y="70" width="38" height="38" rx="4"/>
+    <rect x="140" y="70" width="38" height="38" rx="4"/>
+    <rect x="185" y="70" width="26" height="38" rx="4"/>
+
+    <!-- Second row -->
+    <rect x="50" y="115" width="38" height="38" rx="4"/>
+    <rect x="95" y="115" width="38" height="38" rx="4"/>
+    <rect x="140" y="115" width="38" height="38" rx="4"/>
+    <rect x="185" y="115" width="26" height="38" rx="4"/>
+  </g>
+
+  <!-- Highlights on bricks -->
+  <g fill="#93c5fd" opacity="0.6">
+    <circle cx="69" cy="89" r="3"/>
+    <circle cx="114" cy="89" r="3"/>
+    <circle cx="159" cy="89" r="3"/>
+    <circle cx="198" cy="89" r="3"/>
+
+    <circle cx="69" cy="134" r="3"/>
+    <circle cx="114" cy="134" r="3"/>
+    <circle cx="159" cy="134" r="3"/>
+    <circle cx="198" cy="134" r="3"/>
+  </g>
+
+  <!-- Top accent line -->
+  <line x1="40" y1="45" x2="216" y2="45" stroke="#60a5fa" stroke-width="2" stroke-linecap="round"/>
+</svg>
