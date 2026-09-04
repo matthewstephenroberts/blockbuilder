@@ -1,16 +1,17 @@
 import { GizmoHelper, GizmoViewport, OrbitControls, Grid } from "@react-three/drei";
 import { Canvas, useThree, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useMemo } from "react";
 import { ArrowUpFromLine, Home } from "lucide-react";
+import { featureEdgesGeometry } from "../model/featureEdges";
 
 interface Props {
   geometry: THREE.BufferGeometry;
   color?: string;
   cameraDistance?: number;
   // Only the primary 3D viewport (Viewport3D) should respond to the global triggerHomeAnimation()
-  // call CatalogPanel fires on load — PinPanel renders its own small preview instance and must not
-  // fight over the same trigger.
+  // call CatalogPanel fires on load. Nothing else mounts a GeometryViewport today, but any small
+  // inline preview added later would otherwise fight over the same trigger.
   main?: boolean;
 }
 
@@ -22,7 +23,7 @@ interface InstanceState {
 
 // Module-level so CatalogPanel (outside the R3F tree) can reach the main viewport's home handler —
 // but this must point at only ONE instance's handler, never be written to by every mounted
-// GeometryViewport, or PinPanel's small preview silently steals control of the main view's camera.
+// GeometryViewport, or a secondary inline preview would silently steal the main view's camera.
 let mainTriggerHome: () => void = () => {};
 
 export function triggerHomeAnimation(): void {
@@ -48,6 +49,11 @@ function ViewportContent({
   // unguarded and throws on it, which took the whole canvas down with it — a blank grid is the
   // FIRST thing the app renders, so this has to be checked, not assumed.
   const hasGeometry = (geometry.attributes?.position?.count ?? 0) > 0;
+  // Rebuilt only when the part is, since the extraction walks every triangle of it.
+  const featureEdges = useMemo(
+    () => (hasGeometry ? featureEdgesGeometry(geometry, 24) : null),
+    [geometry, hasGeometry],
+  );
 
   // Store camera and controls for home button to use — scoped to THIS instance's own state object,
   // not shared across every GeometryViewport mounted on the page (see InstanceState doc above).
@@ -120,10 +126,14 @@ function ViewportContent({
       </mesh>
       {/* Feature edges over the top. This is what makes a chamfer unambiguous: a ramp is bounded by
           two hard edges, so it reads as a distinct band whatever the lighting does. The 24° threshold keeps it to real edges — a 128-segment circle's own facets are far below it, so
-          curves don't turn into wireframe. */}
-      {hasGeometry && (
-        <lineSegments>
-          <edgesGeometry args={[geometry, 24]} />
+          curves don't turn into wireframe.
+
+          Deliberately NOT three's own <edgesGeometry>: it also draws every edge that belongs to a
+          single triangle, which on a closed solid is never a real edge, only an artifact of how the
+          coplanar faces got triangulated — and it painted hairline streaks across the middle of
+          flat faces. See featureEdgesGeometry. */}
+      {featureEdges && (
+        <lineSegments geometry={featureEdges}>
           <lineBasicMaterial
             color={isDarkTheme ? "#0b1017" : "#1d2430"}
             transparent
@@ -219,7 +229,7 @@ export default function GeometryViewport({ geometry, color = "#4ea8ff", cameraDi
   const handleUnderside = () => frameFrom(new THREE.Vector3(-0.67, -0.67, -0.75));
 
   // Expose home trigger function for external calls (e.g., from CatalogPanel) — only the main
-  // viewport instance registers itself, so PinPanel's preview never hijacks the trigger.
+  // viewport instance registers itself, so no secondary preview can hijack the trigger.
   if (main) {
     mainTriggerHome = handleHome;
   }

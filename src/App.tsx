@@ -5,12 +5,10 @@ import CatalogPanel from "./components/CatalogPanel";
 import ConfirmDialog from "./components/ConfirmDialog";
 import GridEditor from "./components/GridEditor";
 import Header from "./components/Header";
-import PinPanel from "./components/PinPanel";
 import PrintFitPanel from "./components/PrintFitPanel";
-import RoundingPanel from "./components/RoundingPanel";
 import Toolbar from "./components/Toolbar";
 import Viewport3D from "./components/Viewport3D";
-import { createEmptyGrid } from "./model/grid";
+import { createEmptyGrid, layerPitch } from "./model/grid";
 import { deserializeProject, serializeProject } from "./model/project";
 import { useProjectStore } from "./state/useProjectStore";
 import { downloadText } from "./export/download";
@@ -232,7 +230,6 @@ export default function App() {
               picked, or a beam selected for editing. It's the same condition Toolbar's own beam
               pickers use (`beamMode`), so the beam controls and the beam list appear and disappear
               together instead of the list sitting under every cell brush as permanent furniture. */}
-          <RoundingPanel rounding={store.grid.rounding} onCornersChange={store.setRoundingCorners} />
           <PrintFitPanel
             partClearance={store.grid.partClearance}
             onPartClearanceChange={store.setPartClearance}
@@ -244,10 +241,10 @@ export default function App() {
           <AutoFillDialog
             defaultWidth={store.grid.width}
             defaultHeight={store.grid.height}
+            pitch={layerPitch(store.grid, store.grid.activeLayer)}
             onGenerate={store.autoFill}
           />
           <CatalogPanel onLoad={store.loadProject} />
-          <PinPanel onError={setErrorMessage} />
         </div>
         <div className="centre-panel" ref={splitPanelRef}>
           <div className="viewport-wrap" style={{ flex: `0 0 ${viewportHeight}%` }}>
@@ -280,6 +277,7 @@ export default function App() {
               onRemoveLayer={store.removeLayer}
               onMoveLayerUp={store.moveLayerUp}
               onMoveLayerDown={store.moveLayerDown}
+              onSetLayerSpacing={store.setLayerSpacing}
               onResize={store.resize}
               hiddenLayers={store.hiddenLayers}
               onToggleLayerVisibility={store.toggleLayerVisibility}

@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { ChevronUp, ChevronDown, Copy, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
-import { AXIS_AWARE_TYPES, CELL_TYPE_INFO, CellType, FLIP_AWARE_TYPES, PLATE_FRACTION_INFO } from "../model/cellTypes";
+import { AXIS_AWARE_TYPES, CELL_TYPE_INFO, CellType, FLIP_AWARE_TYPES, plateFractionLabel, PLATE_FRACTION_INFO } from "../model/cellTypes";
 import {
   AngledBeam,
   beamBodySpanStuds,
@@ -24,9 +24,9 @@ import {
   normalizeDegrees,
 } from "../model/angledBeam";
 import { centreForOrigin, CircleRing } from "../model/circleRing";
-import { Cell, getActiveLayer, GridState, inBounds, indexOf, Layer, ResizeAnchor } from "../model/grid";
+import { Cell, getActiveLayer, GridState, inBounds, indexOf, Layer, layerPitch, layerSpacingOf, ResizeAnchor } from "../model/grid";
 import { outerRadiusMm, ringRadiusMm, SlotDisc, slotSizeMm } from "../model/slotDisc";
-import { STUD_PITCH } from "../model/units";
+import { DEFAULT_STUD_PITCH, SUPPORTED_STUD_PITCHES } from "../model/units";
 import { BeamFitSetting, ToolMode } from "../state/useProjectStore";
 import { getCellTypeHexColor } from "../model/colorMap";
 
@@ -67,6 +67,8 @@ interface Props {
   onRemoveLayer: (index: number) => void;
   onMoveLayerUp: (index: number) => void;
   onMoveLayerDown: (index: number) => void;
+  /** Changes the active layer's stud pitch / connector system — see grid.ts's LayerSpacing. */
+  onSetLayerSpacing: (index: number, patch: { pitch?: number; connectorPitch?: number }) => void;
   onResize: (width: number, height: number, anchor?: ResizeAnchor) => void;
   hiddenLayers: ReadonlySet<number>;
   onToggleLayerVisibility: (index: number) => void;
@@ -108,12 +110,12 @@ function flipLabel(flip: boolean | undefined): string {
 /** Spells out a cell's current settings for its hover tooltip, matching the small glyphs overlaid
  * on the cell itself (axis letter, flip letter, plate-height code) so hovering confirms what the
  * overlay is showing. */
-function cellTooltip(cell: Cell, typeLabel: string): string {
+function cellTooltip(cell: Cell, typeLabel: string, pitch: number): string {
   if (cell.type === CellType.Empty) return typeLabel;
   const parts = [typeLabel];
   if (showsAxis(cell)) parts.push(`${(cell.axis ?? "x").toUpperCase()} axis`);
   if (FLIP_AWARE_TYPES.has(cell.type)) parts.push(cell.flip ? "Reversed (-axis)" : "Forward (+axis)");
-  parts.push(PLATE_FRACTION_INFO[cell.plateFraction ?? "full"].label);
+  parts.push(plateFractionLabel(cell.plateFraction ?? "full", pitch));
   if (cell.rounded) parts.push("rounded edges");
   return parts.join(" · ");
 }
@@ -127,6 +129,7 @@ function LayerThumbnail({
   label,
   index,
   totalLayers,
+  spacing,
   hidden,
   onClick,
   onRemove,
@@ -141,6 +144,9 @@ function LayerThumbnail({
   label: string;
   index: number;
   totalLayers: number;
+  /** This layer's own spacing — badged on the thumbnail whenever it isn't the plain 8mm default,
+   * so a mixed-pitch stack is readable at a glance rather than only when a layer is selected. */
+  spacing: { pitch: number; connectorPitch: number };
   hidden: boolean;
   onClick: () => void;
   onRemove: () => void;
@@ -173,7 +179,19 @@ function LayerThumbnail({
             />
           ))}
         </div>
-        <span className="muted sm">{label}</span>
+        <span className="muted sm">
+          {label}
+          {(spacing.pitch !== DEFAULT_STUD_PITCH || spacing.connectorPitch !== spacing.pitch) && (
+            <span
+              className="layer-pitch-badge"
+              title={`${spacing.pitch}mm spacing, ${spacing.connectorPitch}mm pins`}
+            >
+              {spacing.pitch === spacing.connectorPitch
+                ? `${spacing.pitch}mm`
+                : `${spacing.pitch}/${spacing.connectorPitch}mm`}
+            </span>
+          )}
+        </span>
       </button>
       <div className="layer-thumb-controls">
         <button
@@ -266,7 +284,10 @@ function DiscOverlay({
   cellPx: number;
 }) {
   if (discs.length === 0) return null;
-  const mmToPx = cellPx / STUD_PITCH;
+  // Every disc handed to this overlay is on one layer, so its pitch is the scale the whole overlay
+  // is drawn at — a 10mm layer's cells are still one cellPx square on screen, but the disc's own
+  // mm dimensions have to be divided by the pitch those cells actually represent.
+  const mmToPx = cellPx / layerPitch(grid, discs[0].layer);
 
   return (
     <svg
@@ -649,7 +670,7 @@ function BeamFitPreview({
   const b = px(end.x, end.y);
   const dir = { x: (b.x - a.x), y: (b.y - a.y) };
   const len = Math.hypot(dir.x, dir.y) || 1;
-  const lead = (fitted.leadInStart ?? 0) / STUD_PITCH;
+  const lead = (fitted.leadInStart ?? 0) / layerPitch(grid, grid.activeLayer);
   const holes = Array.from({ length: fitted.holes ?? 1 }, (_, i) => {
     const t = (lead + i) / (len / cellPx);
     return { x: a.x + dir.x * t, y: a.y + dir.y * t };
@@ -794,10 +815,11 @@ function BeamOverlay({
         // at either end (see AngledBeam.leadInStart). Drawing the hole-to-hole line instead would
         // show a beam ending short of the cell it actually fuses into.
         const dir = beamDirection(beam);
-        const body = beamBodySpanStuds(beam);
+        const beamPitch = layerPitch(grid, beam.layer);
+        const body = beamBodySpanStuds(beam, beamPitch);
         // The beam's own across-shift (AngledBeam.acrossOffset), so the plan shows where the beam
         // actually is rather than where its anchor cell is.
-        const across = (beam.acrossOffset ?? 0) / STUD_PITCH;
+        const across = (beam.acrossOffset ?? 0) / beamPitch;
         const at = (studsAlong: number) =>
           px(
             beam.anchorX + dir.x * studsAlong - dir.y * across,
@@ -887,7 +909,7 @@ function BeamOverlay({
                   >
                     {solid && <title>Left solid — no room between this hole and the beam&apos;s end face</title>}
                     {miss !== undefined && (
-                      <title>{`Won't pin: the nearest hole of another beam is ${(miss * STUD_PITCH).toFixed(2)}mm away, not through this one. A corner only closes when the run between the two holes is a whole number of studs.`}</title>
+                      <title>{`Won't pin: the nearest hole of another beam is ${(miss * beamPitch).toFixed(2)}mm away, not through this one. A corner only closes when the run between the two holes is a whole number of studs.`}</title>
                     )}
                   </circle>
                 </g>
@@ -932,6 +954,7 @@ function LayerStrip({
   onRemoveLayer,
   onMoveLayerUp,
   onMoveLayerDown,
+  onSetLayerSpacing,
   hiddenLayers,
   onToggleLayerVisibility,
 }: {
@@ -942,6 +965,7 @@ function LayerStrip({
   onRemoveLayer: (index: number) => void;
   onMoveLayerUp: (index: number) => void;
   onMoveLayerDown: (index: number) => void;
+  onSetLayerSpacing: (index: number, patch: { pitch?: number; connectorPitch?: number }) => void;
   hiddenLayers: ReadonlySet<number>;
   onToggleLayerVisibility: (index: number) => void;
 }) {
@@ -963,6 +987,7 @@ function LayerStrip({
               label={label}
               index={layerIndex}
               totalLayers={grid.layers.length}
+              spacing={layerSpacingOf(grid, layerIndex)}
               hidden={hiddenLayers.has(layerIndex)}
               onClick={() => onSelectLayer(layerIndex)}
               onRemove={() => onRemoveLayer(layerIndex)}
@@ -974,6 +999,69 @@ function LayerStrip({
           );
         })}
       </div>
+      <LayerSpacingField grid={grid} onSetLayerSpacing={onSetLayerSpacing} />
+    </div>
+  );
+}
+
+/**
+ * The active layer's stud pitch, and which system's pins it takes.
+ *
+ * Two separate pickers rather than one, because they are genuinely independent settings and the
+ * useful adapter is the case where they disagree — a beam whose holes sit on a 10mm grid so it
+ * bolts to a 10mm frame, while still taking the 8mm pins you already own. Collapsing them
+ * into a single "system" switch would make exactly that part unbuildable.
+ *
+ * Per-LAYER rather than per-project for the same reason: the other adapter is a part whose lower
+ * half plugs into one system and whose upper half plugs into the other, and layers stay concentric
+ * (every coordinate is measured out from the grid's centre), so the two halves line up on their
+ * shared centreline whatever their pitches are.
+ */
+function LayerSpacingField({
+  grid,
+  onSetLayerSpacing,
+}: {
+  grid: GridState;
+  onSetLayerSpacing: (index: number, patch: { pitch?: number; connectorPitch?: number }) => void;
+}) {
+  const active = grid.activeLayer;
+  const { pitch, connectorPitch } = layerSpacingOf(grid, active);
+  const mismatched = connectorPitch !== pitch;
+  return (
+    <div className="layer-spacing">
+      <label className="field">
+        <span>Layer spacing</span>
+        <select
+          value={pitch}
+          onChange={(e) => onSetLayerSpacing(active, { pitch: Number(e.target.value) })}
+          title="Cell-to-cell spacing on this layer. Layers of different spacing stay concentric — they share the grid's centre — so one part can bridge both systems."
+        >
+          {SUPPORTED_STUD_PITCHES.map((p) => (
+            <option key={p} value={p}>
+              {p}mm
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>Pins &amp; holes</span>
+        <select
+          value={connectorPitch}
+          onChange={(e) => onSetLayerSpacing(active, { connectorPitch: Number(e.target.value) })}
+          title="Which system's pins this layer's holes and connectors are sized for. Normally matches the spacing; set it to 8mm on a 10mm layer to build a part that mounts on a 10mm grid but takes 8mm pins."
+        >
+          {SUPPORTED_STUD_PITCHES.map((p) => (
+            <option key={p} value={p}>
+              {p}mm
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="muted sm" style={{ margin: 0, flexBasis: "100%" }}>
+        {mismatched
+          ? `Adapter layer: holes on the ${pitch}mm grid, sized for ${connectorPitch}mm pins.`
+          : `Cells, heights and connectors all on the ${pitch}mm module.`}
+      </p>
     </div>
   );
 }
@@ -1102,6 +1190,7 @@ export default function GridEditor({
   onRemoveLayer,
   onMoveLayerUp,
   onMoveLayerDown,
+  onSetLayerSpacing,
   onResize,
   hiddenLayers,
   onToggleLayerVisibility,
@@ -1341,6 +1430,7 @@ export default function GridEditor({
         onRemoveLayer={onRemoveLayer}
         onMoveLayerUp={onMoveLayerUp}
         onMoveLayerDown={onMoveLayerDown}
+        onSetLayerSpacing={onSetLayerSpacing}
         hiddenLayers={hiddenLayers}
         onToggleLayerVisibility={onToggleLayerVisibility}
       />
@@ -1430,7 +1520,7 @@ export default function GridEditor({
                   gridRow: grid.height - y,
                   background: cell.type === CellType.Empty ? undefined : cellHexColor,
                 }}
-                title={cellTooltip(cell, info.label)}
+                title={cellTooltip(cell, info.label, layerPitch(grid, grid.activeLayer))}
               >
                 {cell.type !== CellType.Empty && showGlyphs && (
                   <>

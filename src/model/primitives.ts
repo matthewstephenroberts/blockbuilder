@@ -20,6 +20,16 @@ import {
   STUD_RADIUS,
 } from "./units";
 
+/**
+ * Every connector dimension in this file is multiplied by a `scale` — 1 for the standard 8mm
+ * system, 1.25 for a native 10mm one, which is the 8mm system scaled uniformly, pins and axles
+ * included, rather than the same pins on a wider grid. A layer picks its own scale (see grid.ts's LayerSpacing), so one printed part
+ * can carry 8mm connectors on one layer and 10mm ones on another — which is the whole point of an
+ * adapter.
+ *
+ * Print CLEARANCE is deliberately not scaled with it: it compensates for the printer, and a printer
+ * is no more accurate on a bigger part.
+ */
 const cache = new Map<string, THREE.BufferGeometry>();
 
 function cached(key: string, build: () => THREE.BufferGeometry): THREE.BufferGeometry {
@@ -41,8 +51,9 @@ export function boxGeometry(sizeX: number, sizeY: number, sizeZ: number): THREE.
  * `totalLength`. Unlike `studGeometry` (fixed Z-up, used by the old automatic-top-stud logic),
  * this can point along x/y/z, matching how Pin/BallPin cells already work.
  */
-export function studConnectorGeometry(totalLength: number, axis: HoleAxis): THREE.BufferGeometry {
-  const geom = new THREE.CylinderGeometry(STUD_RADIUS, STUD_RADIUS, totalLength, 40);
+export function studConnectorGeometry(totalLength: number, axis: HoleAxis, scale = 1): THREE.BufferGeometry {
+  const r = STUD_RADIUS * scale;
+  const geom = new THREE.CylinderGeometry(r, r, totalLength, 40);
   geom.translate(0, totalLength / 2, 0); // base-anchored at the origin, growing +Y
   if (axis === "y") return geom;
   if (axis === "z") {
@@ -87,32 +98,35 @@ function revolveProfile(points: [radius: number, y: number][], radialSegments = 
  * from either direction instead of forcing it to find a single narrow opening. Built as one
  * revolved profile (see revolveProfile) rather than a union of overlapping cylinders.
  */
-export function pinHoleGeometry(length: number, axis: HoleAxis, holeClearance = 0): THREE.BufferGeometry {
-  const geom = cached(`pinhole:${length}:${axis}:${holeClearance}`, () => {
+export function pinHoleGeometry(length: number, axis: HoleAxis, holeClearance = 0, scale = 1): THREE.BufferGeometry {
+  const geom = cached(`pinhole:${length}:${axis}:${holeClearance}:${scale}`, () => {
     const half = length / 2 + CUT_EPSILON;
-    const radius = PIN_HOLE_RADIUS + holeClearance;
+    const boss = PIN_HOLE_BOSS_RADIUS * scale;
+    const chamferDepth = PIN_HOLE_CHAMFER_DEPTH * scale;
+    const seatSetback = PIN_HOLE_COLLAR_SEAT_SETBACK * scale;
+    const radius = PIN_HOLE_RADIUS * scale + holeClearance;
 
     // The counterbore reaches the bore through a 45° cone, not a flat 90° ring — see
     // PIN_HOLE_COLLAR_SEAT_SETBACK for why (that ring is unprintable on a vertical bore) and for
     // why the straight section is shortened by exactly the setback: it keeps the depth a pin's
     // collar comes to rest at unchanged at PIN_HOLE_CHAMFER_DEPTH.
-    const coneRise = Math.max(0, PIN_HOLE_BOSS_RADIUS - radius); // 45°, so rise == radial gap
+    const coneRise = Math.max(0, boss - radius); // 45°, so rise == radial gap
     // A very short bore (a thin plate plus a vertical hole) hasn't room for two full mouths; give
     // each at most a little under half the length so the two never cross over each other.
     const maxMouth = (length / 2) * 0.9;
-    const straight = Math.min(Math.max(0, PIN_HOLE_CHAMFER_DEPTH - PIN_HOLE_COLLAR_SEAT_SETBACK), maxMouth);
+    const straight = Math.min(Math.max(0, chamferDepth - seatSetback), maxMouth);
     const cone = Math.min(coneRise, maxMouth - straight);
 
     const coneStart = -length / 2 + straight; // counterbore stops being straight here
     const boreStart = coneStart + cone; // full narrow bore from here inward
     const profile = revolveProfile([
       [0, -half],
-      [PIN_HOLE_BOSS_RADIUS, -half],
-      [PIN_HOLE_BOSS_RADIUS, coneStart],
+      [boss, -half],
+      [boss, coneStart],
       [radius, boreStart],
       [radius, -boreStart],
-      [PIN_HOLE_BOSS_RADIUS, -coneStart],
-      [PIN_HOLE_BOSS_RADIUS, half],
+      [boss, -coneStart],
+      [boss, half],
       [0, half],
     ]);
     return orientAlongAxis(profile, axis);
@@ -124,9 +138,9 @@ export function pinHoleGeometry(length: number, axis: HoleAxis, holeClearance = 
  * A plain, uniform-radius through-hole for a standard System-style stud — unlike a Technic hole,
  * a stud doesn't need guiding in from both directions, so there's no wider entrance chamfer.
  */
-export function studHoleGeometry(length: number, axis: HoleAxis, holeClearance = 0): THREE.BufferGeometry {
-  const geom = cached(`studhole:${length}:${axis}:${holeClearance}`, () => {
-    const radius = STUD_HOLE_RADIUS + holeClearance;
+export function studHoleGeometry(length: number, axis: HoleAxis, holeClearance = 0, scale = 1): THREE.BufferGeometry {
+  const geom = cached(`studhole:${length}:${axis}:${holeClearance}:${scale}`, () => {
+    const radius = STUD_HOLE_RADIUS * scale + holeClearance;
     const base = new THREE.CylinderGeometry(radius, radius, length + CUT_EPSILON * 2, 40);
     return orientAlongAxis(base, axis);
   });
@@ -181,13 +195,13 @@ function axleCrossOutline(outerRadius: number, armWidth: number, arcSegments = 1
  * half-width) clipped to fit inside a circle of PIN_HOLE_RADIUS. Built as a single extrusion of
  * the analytic outline above (see axleCrossOutline) rather than a CSG union+intersection.
  */
-export function axleHoleGeometry(length: number, axis: HoleAxis, holeClearance = 0): THREE.BufferGeometry {
-  const geom = cached(`axlehole:${length}:${axis}:${holeClearance}`, () => {
+export function axleHoleGeometry(length: number, axis: HoleAxis, holeClearance = 0, scale = 1): THREE.BufferGeometry {
+  const geom = cached(`axlehole:${length}:${axis}:${holeClearance}:${scale}`, () => {
     const totalLength = length + CUT_EPSILON * 2;
     // Widening both the arm half-width and the outer clipping circle by the same amount grows the
     // whole cross-shaped slot uniformly, keeping its proportions (and wing angle) matching the
     // reference instead of just the arms getting wider relative to a fixed outer bound.
-    const shape = new THREE.Shape(axleCrossOutline(PIN_HOLE_RADIUS + holeClearance, AXLE_ARM_WIDTH + holeClearance));
+    const shape = new THREE.Shape(axleCrossOutline(PIN_HOLE_RADIUS * scale + holeClearance, AXLE_ARM_WIDTH * scale + holeClearance));
     const extruded = new THREE.ExtrudeGeometry(shape, { depth: totalLength, bevelEnabled: false, curveSegments: 1 });
     // ExtrudeGeometry builds the shape in the XY plane, extruded along +Z from 0 to totalLength —
     // recentre on Z, then rotate Z (its long axis) onto Y, matching orientAlongAxis's convention.
@@ -205,9 +219,9 @@ export function axleHoleGeometry(length: number, axis: HoleAxis, holeClearance =
  * flipping it (see geometry.ts's Pin handling) only needs to mirror where it's placed, not rotate
  * the rod itself — a real axle has no taper or asymmetric feature along its length.
  */
-export function axleRodGeometry(length: number, axis: HoleAxis): THREE.BufferGeometry {
-  const geom = cached(`axlerod:${length}:${axis}`, () => {
-    const shape = new THREE.Shape(axleCrossOutline(AXLE_ROD_ARM_LENGTH, AXLE_ROD_ARM_WIDTH));
+export function axleRodGeometry(length: number, axis: HoleAxis, scale = 1): THREE.BufferGeometry {
+  const geom = cached(`axlerod:${length}:${axis}:${scale}`, () => {
+    const shape = new THREE.Shape(axleCrossOutline(AXLE_ROD_ARM_LENGTH * scale, AXLE_ROD_ARM_WIDTH * scale));
     const extruded = new THREE.ExtrudeGeometry(shape, { depth: length, bevelEnabled: false, curveSegments: 1 });
     extruded.translate(0, 0, -length / 2);
     extruded.rotateX(-Math.PI / 2);
@@ -228,19 +242,21 @@ export function axleRodGeometry(length: number, axis: HoleAxis): THREE.BufferGeo
  * equivalent of unioning a sphere with a coaxial cylinder); the backing side has no channel floor
  * at all, so the profile just follows the sphere and pinches shut well before reaching that face.
  */
-export function ballJointGeometry(channelLength: number, axis: HoleAxis, flip = false): THREE.BufferGeometry {
-  const geom = cached(`balljoint:${channelLength}:${axis}:${flip}`, () => {
+export function ballJointGeometry(channelLength: number, axis: HoleAxis, flip = false, scale = 1): THREE.BufferGeometry {
+  const geom = cached(`balljoint:${channelLength}:${axis}:${flip}:${scale}`, () => {
     const half = channelLength / 2 + CUT_EPSILON;
+    const ballRadius = BALL_JOINT_RADIUS * scale;
+    const channelRadius = BALL_JOINT_CHANNEL_RADIUS * scale;
     const segments = 32;
     const portSign = flip ? -1 : 1;
     const points: [number, number][] = [[0, -half]];
     for (let i = 0; i <= segments; i++) {
       const y = -half + (2 * half * i) / segments;
-      const sphereR = Math.abs(y) <= BALL_JOINT_RADIUS ? Math.sqrt(BALL_JOINT_RADIUS ** 2 - y * y) : 0;
+      const sphereR = Math.abs(y) <= ballRadius ? Math.sqrt(ballRadius ** 2 - y * y) : 0;
       // Only the port side gets the channel floor — the backing side follows the sphere alone,
       // which naturally closes to a point well inside the cell instead of opening a second port.
       const onPortSide = Math.sign(y || portSign) === portSign;
-      points.push([onPortSide ? Math.max(BALL_JOINT_CHANNEL_RADIUS, sphereR) : sphereR, y]);
+      points.push([onPortSide ? Math.max(channelRadius, sphereR) : sphereR, y]);
     }
     points.push([0, half]);
     return orientAlongAxis(revolveProfile(points), axis);
@@ -277,14 +293,21 @@ export async function ballSocketForkKeeperGeometry(
   channelLength: number,
   axis: HoleAxis,
   flip = false,
+  scale = 1,
+  pitch = STUD_PITCH,
 ): Promise<THREE.BufferGeometry> {
   const half = channelLength / 2 + CUT_EPSILON;
   const portSign = flip ? -1 : 1;
-  const cellHalf = STUD_PITCH / 2;
+  const forkOpenHalfWidth = BALL_SOCKET_FORK_OPEN_HALF_WIDTH * scale;
+  const prongHalfWidth = BALL_SOCKET_FORK_PRONG_HALF_WIDTH * scale;
+  // The prongs are bounded against the CELL's own wall, so that bound follows the layer's lattice
+  // pitch, not the connector scale — the two are separate settings and on an adapter layer they
+  // genuinely differ.
+  const cellHalf = pitch / 2;
   const overhang = 1; // past the cell's own wall, for a clean intersect at that outer edge only
   // On a short cell (e.g. a 1-plate z-axis ball joint) the "ideal" fork depth wouldn't fit without
   // reaching past the bore's own centreline — clamp so the fork stops at most halfway in.
-  const forkDepth = Math.min(BALL_SOCKET_FORK_DEPTH, half);
+  const forkDepth = Math.min(BALL_SOCKET_FORK_DEPTH * scale, half);
 
   const portFaceY = portSign * half; // a TRUE outer boundary of the whole geometry
   const farEndY = -portFaceY; // the OTHER true outer boundary
@@ -315,10 +338,10 @@ export async function ballSocketForkKeeperGeometry(
   // FULL cell width in X, i.e. still closed at the sides. Bounding X too (well short of the
   // cell's own STUD_PITCH/2 wall) is what actually leaves open air to the left and right, matching
   // "open sides" (plural) rather than a single slot.
-  const capDepth = cellHalf + overhang - BALL_SOCKET_FORK_OPEN_HALF_WIDTH;
+  const capDepth = cellHalf + overhang - forkOpenHalfWidth;
   const capBox = (zSign: 1 | -1) => {
-    const box = new THREE.BoxGeometry(BALL_SOCKET_FORK_PRONG_HALF_WIDTH * 2, forkLength, capDepth);
-    box.translate(0, forkCenterY, zSign * (BALL_SOCKET_FORK_OPEN_HALF_WIDTH + capDepth / 2));
+    const box = new THREE.BoxGeometry(prongHalfWidth * 2, forkLength, capDepth);
+    box.translate(0, forkCenterY, zSign * (forkOpenHalfWidth + capDepth / 2));
     return box;
   };
 

@@ -5,9 +5,9 @@ import { buildSlotDiscGeometry } from "./slotDiscGeometry";
 import { buildBallPinGeometry } from "./ballPin";
 import { buildCircleSolidGeometry, CIRCLE_CUT_OVERHANG, CIRCLE_SEGMENTS } from "./circleSolidGeometry";
 import { AXIS_AWARE_TYPES, BLEND_AWARE_TYPES, BODY_REPLACING_TYPES, CellType, HOLE_TYPES, HoleAxis, PlateFraction } from "./cellTypes";
-import { intersect, intersectCylinderZ, subtract, subtractCylinderZ, unionAll } from "./csg";
+import { dropDegenerateTriangles, intersect, intersectCylinderZ, subtract, subtractCylinderZ, unionAll } from "./csg";
 import { CircleRing, ringColRow } from "./circleRing";
-import { Cell, GridState, circleRingOf, inBounds, indexOf, Layer } from "./grid";
+import { Cell, GridState, circleRingOf, inBounds, indexOf, Layer, layerConnectorScale, layerPitch } from "./grid";
 import { buildPinGeometry } from "./pin";
 import {
   axleHoleGeometry,
@@ -19,22 +19,20 @@ import {
   studConnectorGeometry,
   studHoleGeometry,
 } from "./primitives";
-import { applyRounding, cellCapCylinder, CornerSafety, roundCellCorners } from "./rounding";
+import { cellCapCylinder, roundCellCorners } from "./rounding";
 import {
   CELL_OVERLAP,
   PIN_COLLAR_RADIUS_REDUCED,
   PIN_HOLE_BOSS_RADIUS,
+  DEFAULT_STUD_PITCH,
   PLATE_HEIGHT,
   STUD_HEIGHT,
   STUD_OVERLAP,
   STUD_PITCH,
-  TECHNIC_HALF_MODULE_HEIGHT,
-  TECHNIC_MODULE_HEIGHT,
+  technicHalfModuleHeight,
+  technicModuleHeight,
 } from "./units";
 
-// A safety margin (mm) kept between a corner's rounding cut and a nearby hole's own boss
-// boundary, on top of the geometric clearance computed in buildGridGeometry.
-const CORNER_HOLE_MARGIN = 0.5;
 
 // How far blendCornerToNeighbors' notch overshoots past a cell's own true outer edge, so its
 // outer face genuinely passes through material instead of landing exactly coincident with it.
@@ -54,23 +52,32 @@ const FULL_HEIGHT_PLATES = 3;
 
 /** The fixed-height plate fractions' own mm value, or undefined for "minimal" (which has no fixed
  * value — it's computed relative to whatever the rest of its layer resolves to; see `plateHeight`). */
-export function fixedPlateHeight(fraction: PlateFraction | undefined): number | undefined {
+export function fixedPlateHeight(fraction: PlateFraction | undefined, pitch: number = STUD_PITCH): number | undefined {
+  // EVERY height follows the layer's stud pitch, plate fractions included. A 10mm system is the
+  // 8mm one scaled uniformly — the same 1.25 that thickens its pins also thickens its plates — so
+  // a plate is 4mm there, not 3.2mm, and a brick is 12mm, not 9.6mm. Leaving the numbered
+  // fractions fixed while the module ones scaled (which is what this function did at first) put
+  // the two on different systems: "3 plates" and "Full" are meant to be the same height as each
+  // other and 1.2 modules tall, and at 10mm pitch they silently stopped being either.
+  //
+  // At the default 8mm pitch the scale is exactly 1, so nothing about an existing project moves.
+  const scale = pitch / DEFAULT_STUD_PITCH;
   switch (fraction) {
     case "module":
-      return TECHNIC_MODULE_HEIGHT;
+      return technicModuleHeight(pitch);
     case "halfModule":
-      return TECHNIC_HALF_MODULE_HEIGHT;
+      return technicHalfModuleHeight(pitch);
     case "1":
-      return PLATE_HEIGHT;
+      return PLATE_HEIGHT * scale;
     case "2":
-      return PLATE_HEIGHT * 2;
+      return PLATE_HEIGHT * 2 * scale;
     case "3":
-      return PLATE_HEIGHT * 3;
+      return PLATE_HEIGHT * 3 * scale;
     case "minimal":
       return undefined;
     case "full":
     default:
-      return PLATE_HEIGHT * FULL_HEIGHT_PLATES;
+      return PLATE_HEIGHT * FULL_HEIGHT_PLATES * scale;
   }
 }
 
@@ -80,8 +87,8 @@ export function fixedPlateHeight(fraction: PlateFraction | undefined): number | 
  * the centre of that neighbour's own cell — so it must end below (referenceHeight/2 - boss
  * radius). Never goes below a small printable floor.
  */
-function plateHeight(fraction: PlateFraction | undefined, referenceHeight: number): number {
-  return fixedPlateHeight(fraction) ?? Math.max(0.8, referenceHeight / 2 - PIN_HOLE_BOSS_RADIUS);
+function plateHeight(fraction: PlateFraction | undefined, referenceHeight: number, pitch: number = STUD_PITCH): number {
+  return fixedPlateHeight(fraction, pitch) ?? Math.max(0.8, referenceHeight / 2 - PIN_HOLE_BOSS_RADIUS);
 }
 
 /**
@@ -93,6 +100,9 @@ function plateHeight(fraction: PlateFraction | undefined, referenceHeight: numbe
  */
 export function computeLayerHeights(grid: GridState): number[] {
   return grid.layers.map((layer, li) => {
+    // This layer's own pitch — "module"/"halfModule" heights follow it (see fixedPlateHeight), so
+    // a 10mm layer's full-height cells stand 10mm tall and the layer above starts 10mm up.
+    const pitch = layerPitch(grid, li);
     // An angled beam occupies its layer exactly as a cell does, so it counts toward that layer's
     // height too — otherwise a layer holding only beams would fall back to a default height that
     // has nothing to do with the beams actually in it, and every layer above would sit at the
@@ -103,24 +113,24 @@ export function computeLayerHeights(grid: GridState): number[] {
     let reference = 0;
     for (const cell of layer) {
       if (cell.type === CellType.Empty) continue;
-      const fixed = fixedPlateHeight(cell.plateFraction);
+      const fixed = fixedPlateHeight(cell.plateFraction, pitch);
       if (fixed !== undefined) reference = Math.max(reference, fixed);
     }
     for (const item of [...beams, ...discs]) {
-      const fixed = fixedPlateHeight(item.plateFraction ?? "module");
+      const fixed = fixedPlateHeight(item.plateFraction ?? "module", pitch);
       if (fixed !== undefined) reference = Math.max(reference, fixed);
     }
-    if (reference === 0) reference = PLATE_HEIGHT * FULL_HEIGHT_PLATES;
+    if (reference === 0) reference = fixedPlateHeight("full", pitch)!;
 
     let maxHeight = 0;
     for (const cell of layer) {
       if (cell.type === CellType.Empty) continue;
-      maxHeight = Math.max(maxHeight, plateHeight(cell.plateFraction, reference));
+      maxHeight = Math.max(maxHeight, plateHeight(cell.plateFraction, reference, pitch));
     }
     for (const item of [...beams, ...discs]) {
-      maxHeight = Math.max(maxHeight, plateHeight(item.plateFraction ?? "module", reference));
+      maxHeight = Math.max(maxHeight, plateHeight(item.plateFraction ?? "module", reference, pitch));
     }
-    return maxHeight || PLATE_HEIGHT * FULL_HEIGHT_PLATES;
+    return maxHeight || fixedPlateHeight("full", pitch)!;
   });
 }
 
@@ -152,6 +162,7 @@ function circleCellGap(
   cy: number,
   dx: number,
   dy: number,
+  pitch: number,
 ): boolean {
   if (!inBounds(grid, nx, ny)) return false;
   const neighbor = layer[indexOf(grid, nx, ny)];
@@ -162,16 +173,16 @@ function circleCellGap(
   const slice = ringColRow(ring, nx, ny);
   if (!slice) return false;
   const centerIndex = (dimension - 1) / 2;
-  const neighborCx = (nx - (grid.width - 1) / 2) * STUD_PITCH;
-  const neighborCy = (ny - (grid.height - 1) / 2) * STUD_PITCH;
-  const groupCenterX = neighborCx - (slice.col - centerIndex) * STUD_PITCH;
-  const groupCenterY = neighborCy - (centerIndex - slice.row) * STUD_PITCH;
+  const neighborCx = (nx - (grid.width - 1) / 2) * pitch;
+  const neighborCy = (ny - (grid.height - 1) / 2) * pitch;
+  const groupCenterX = neighborCx - (slice.col - centerIndex) * pitch;
+  const groupCenterY = neighborCy - (centerIndex - slice.row) * pitch;
   // Small safety margins (well past RADIUS_EPSILON's own tiny nudge) so only a genuine, visually
   // meaningful gap triggers a bridge — not a hairline sliver that's already connected.
-  const innerRadius = ring.hollow ? Math.max(0, ((dimension - 1) / 2) * STUD_PITCH - 0.5) : 0;
-  const outerRadius = ring.outerSquare ? Infinity : (dimension / 2) * STUD_PITCH + 0.5;
+  const innerRadius = ring.hollow ? Math.max(0, ((dimension - 1) / 2) * pitch - 0.5) : 0;
+  const outerRadius = ring.outerSquare ? Infinity : (dimension / 2) * pitch + 0.5;
 
-  const half = STUD_PITCH / 2;
+  const half = pitch / 2;
   const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
   const at = (px: number, py: number) => Math.hypot(px - groupCenterX, py - groupCenterY);
   let closestDist: number;
@@ -218,7 +229,7 @@ function circleCellGap(
  * Filling a cell that HOLDS material already overlaps that material, so the two are one solid and
  * the walk is done: stop there whatever the far edge says.
  */
-function ringCellHasMaterial(grid: GridState, layer: Layer, nx: number, ny: number): boolean {
+function ringCellHasMaterial(grid: GridState, layer: Layer, nx: number, ny: number, pitch: number): boolean {
   if (!inBounds(grid, nx, ny)) return false;
   const cell = layer[indexOf(grid, nx, ny)];
   const ring = circleRingOf(grid, cell);
@@ -227,17 +238,17 @@ function ringCellHasMaterial(grid: GridState, layer: Layer, nx: number, ny: numb
   if (!slice) return false;
   const { dimension } = ring;
   const centerIndex = (dimension - 1) / 2;
-  const cellCx = (nx - (grid.width - 1) / 2) * STUD_PITCH;
-  const cellCy = (ny - (grid.height - 1) / 2) * STUD_PITCH;
-  const groupCenterX = cellCx - (slice.col - centerIndex) * STUD_PITCH;
-  const groupCenterY = cellCy - (centerIndex - slice.row) * STUD_PITCH;
-  const half = STUD_PITCH / 2;
+  const cellCx = (nx - (grid.width - 1) / 2) * pitch;
+  const cellCy = (ny - (grid.height - 1) / 2) * pitch;
+  const groupCenterX = cellCx - (slice.col - centerIndex) * pitch;
+  const groupCenterY = cellCy - (centerIndex - slice.row) * pitch;
+  const half = pitch / 2;
   const dxAbs = Math.abs(cellCx - groupCenterX);
   const dyAbs = Math.abs(cellCy - groupCenterY);
   const near = Math.hypot(Math.max(0, dxAbs - half), Math.max(0, dyAbs - half));
   const far = Math.hypot(dxAbs + half, dyAbs + half);
-  const innerRadius = ring.hollow ? ((dimension - 1) / 2) * STUD_PITCH : 0;
-  const outerRadius = ring.outerSquare ? Infinity : (dimension / 2) * STUD_PITCH;
+  const innerRadius = ring.hollow ? ((dimension - 1) / 2) * pitch : 0;
+  const outerRadius = ring.outerSquare ? Infinity : (dimension / 2) * pitch;
   return near < outerRadius && far > innerRadius;
 }
 
@@ -253,6 +264,7 @@ async function collectJoinBridges(
   dx: number,
   dy: number,
   box: THREE.BufferGeometry,
+  pitch: number,
 ): Promise<THREE.BufferGeometry[]> {
   const bridges: THREE.BufferGeometry[] = [];
   /** The ring being bridged to, taken from the first gapped cell — they are all the same ring. */
@@ -263,16 +275,16 @@ async function collectJoinBridges(
   let ny = y + dy;
   let steps = 0;
   const maxSteps = grid.width + grid.height;
-  while (steps < maxSteps && circleCellGap(grid, layer, nx, ny, stepCx, stepCy, dx, dy)) {
+  while (steps < maxSteps && circleCellGap(grid, layer, nx, ny, stepCx, stepCy, dx, dy, pitch)) {
     bridged = bridged ?? circleRingOf(grid, layer[indexOf(grid, nx, ny)]);
     const bridge = box.clone();
-    bridge.translate((nx - x) * STUD_PITCH, (ny - y) * STUD_PITCH, 0);
+    bridge.translate((nx - x) * pitch, (ny - y) * pitch, 0);
     bridges.push(bridge);
     // Reached the wall: this bridge overlaps real ring material, so the join is made and going on
     // would only push a bar deeper into the ring.
-    if (ringCellHasMaterial(grid, layer, nx, ny)) break;
-    stepCx += dx * STUD_PITCH;
-    stepCy += dy * STUD_PITCH;
+    if (ringCellHasMaterial(grid, layer, nx, ny, pitch)) break;
+    stepCx += dx * pitch;
+    stepCy += dy * pitch;
     nx += dx;
     ny += dy;
     steps++;
@@ -288,12 +300,12 @@ async function collectJoinBridges(
   if (!slice) return bridges;
   const { dimension } = bridged;
   const centerIndex = (dimension - 1) / 2;
-  const firstCx = (x + dx - (grid.width - 1) / 2) * STUD_PITCH;
-  const firstCy = (y + dy - (grid.height - 1) / 2) * STUD_PITCH;
-  const groupCenterX = firstCx - (slice.col - centerIndex) * STUD_PITCH;
-  const groupCenterY = firstCy - (centerIndex - slice.row) * STUD_PITCH;
-  const innerRadius = bridged.hollow ? ((dimension - 1) / 2) * STUD_PITCH : 0;
-  const outerRadius = bridged.outerSquare ? Infinity : (dimension / 2) * STUD_PITCH;
+  const firstCx = (x + dx - (grid.width - 1) / 2) * pitch;
+  const firstCy = (y + dy - (grid.height - 1) / 2) * pitch;
+  const groupCenterX = firstCx - (slice.col - centerIndex) * pitch;
+  const groupCenterY = firstCy - (centerIndex - slice.row) * pitch;
+  const innerRadius = bridged.hollow ? ((dimension - 1) / 2) * pitch : 0;
+  const outerRadius = bridged.outerSquare ? Infinity : (dimension / 2) * pitch;
   // Which void the SOURCE cell sits in decides which way the clip runs.
   const sourceR = Math.hypot(cx - groupCenterX, cy - groupCenterY);
   const tall = height + CIRCLE_CUT_OVERHANG * 2;
@@ -320,13 +332,13 @@ async function collectJoinBridges(
  * Used by `blendCornerToNeighbors` to find out how much an un-narrowed corner cell should recede
  * to match a narrowed neighbour it doesn't share an axis with.
  */
-function axisFaceInsets(cell: Cell, axisLetter: "x" | "y"): { minInset: number; maxInset: number } {
+function axisFaceInsets(cell: Cell, axisLetter: "x" | "y", pitch: number): { minInset: number; maxInset: number } {
   if (cell.axis !== axisLetter || !cell.widthFraction) return { minInset: 0, maxInset: 0 };
-  const axisSpan = Math.min(STUD_PITCH, fixedPlateHeight(cell.widthFraction) ?? STUD_PITCH);
-  if (axisSpan >= STUD_PITCH) return { minInset: 0, maxInset: 0 };
+  const axisSpan = Math.min(pitch, fixedPlateHeight(cell.widthFraction, pitch) ?? pitch);
+  if (axisSpan >= pitch) return { minInset: 0, maxInset: 0 };
   const widthSign = (cell.flip ?? false) ? -1 : 1;
-  const widthOffset = (widthSign * (axisSpan - STUD_PITCH)) / 2;
-  const half = STUD_PITCH / 2;
+  const widthOffset = (widthSign * (axisSpan - pitch)) / 2;
+  const half = pitch / 2;
   const minFace = widthOffset - axisSpan / 2;
   const maxFace = widthOffset + axisSpan / 2;
   return { minInset: Math.max(0, minFace + half), maxInset: Math.max(0, half - maxFace) };
@@ -362,11 +374,12 @@ async function blendCornerToNeighbors(
   sx: 1 | -1,
   sy: 1 | -1,
   piece: THREE.BufferGeometry,
+  pitch: number,
 ): Promise<THREE.BufferGeometry> {
   const yNeighbor = inBounds(grid, x + sx, y) ? layer[indexOf(grid, x + sx, y)] : undefined;
   const xNeighbor = inBounds(grid, x, y + sy) ? layer[indexOf(grid, x, y + sy)] : undefined;
-  const yInsets = yNeighbor ? axisFaceInsets(yNeighbor, "y") : { minInset: 0, maxInset: 0 };
-  const xInsets = xNeighbor ? axisFaceInsets(xNeighbor, "x") : { minInset: 0, maxInset: 0 };
+  const yInsets = yNeighbor ? axisFaceInsets(yNeighbor, "y", pitch) : { minInset: 0, maxInset: 0 };
+  const xInsets = xNeighbor ? axisFaceInsets(xNeighbor, "x", pitch) : { minInset: 0, maxInset: 0 };
   const yInset = sy > 0 ? yInsets.maxInset : yInsets.minInset;
   const xInset = sx > 0 ? xInsets.maxInset : xInsets.minInset;
   if (xInset <= 0 || yInset <= 0) return piece;
@@ -377,7 +390,7 @@ async function blendCornerToNeighbors(
   // elsewhere in this codebase (an exact tangent/coincident plane can silently no-op a boolean
   // instead of producing the expected cut). The INNER face (the real cut line, at half - inset)
   // doesn't need this: it's a genuinely new boundary, not coincident with any existing face.
-  const half = STUD_PITCH / 2;
+  const half = pitch / 2;
   const notchWidth = xInset + CORNER_NOTCH_OVERSHOOT;
   const notchDepth = yInset + CORNER_NOTCH_OVERSHOOT;
   const notch = new THREE.BoxGeometry(notchWidth, notchDepth, cellHeight * 4);
@@ -513,8 +526,8 @@ function chamferCutters(
  * Built from explicit per-axis min/max rather than a symmetric box, since which faces (if any)
  * need insetting varies per cell.
  */
-function insetCellBox(cx: number, cy: number, cz: number, cellHeight: number, ext: ExteriorFaces, clearance: number): THREE.BufferGeometry {
-  const halfXY = STUD_PITCH / 2 + CELL_OVERLAP / 2;
+function insetCellBox(cx: number, cy: number, cz: number, cellHeight: number, ext: ExteriorFaces, clearance: number, pitch: number): THREE.BufferGeometry {
+  const halfXY = pitch / 2 + CELL_OVERLAP / 2;
   const xLo = -halfXY + (ext.xMin ? clearance : 0);
   const xHi = halfXY - (ext.xMax ? clearance : 0);
   const yLo = -halfXY + (ext.yMin ? clearance : 0);
@@ -731,15 +744,28 @@ export async function buildGridGeometry(
     const layer = grid.layers[li];
     const layerHeight = layerHeights[li];
     const layerBase = layerBases[li];
+    // This layer's own lattice pitch, and the factor its CONNECTORS are scaled by. The two are
+    // separate settings (see LayerSpacing): `pitch` spreads the cells out, `connectorScale` sizes
+    // the pins and bores, and a layer that mixes them is exactly the adapter this feature is for —
+    // e.g. holes on a 10mm grid that still take an 8mm pin.
+    const pitch = layerPitch(grid, li);
+    const connectorScale = layerConnectorScale(grid, li);
+    // An embedded connector's own length follows the system its dimensions come from, not the
+    // lattice it is spaced on: a 10mm-system pin is longer as well as thicker, and an 8mm pin
+    // dropped onto a 10mm layer must stay the length it really is or it won't seat in the hole.
+    const pinEmbedLength = PIN_EMBED_LENGTH * connectorScale;
+    const pinProtrudeLength = PIN_PROTRUDE_LENGTH * connectorScale;
+    const studHeight = STUD_HEIGHT * connectorScale;
+    const studOverlap = STUD_OVERLAP * connectorScale;
 
     for (let y = 0; y < grid.height; y++) {
       for (let x = 0; x < grid.width; x++) {
         const cell = layer[indexOf(grid, x, y)];
         if (cell.type === CellType.Empty) continue;
 
-        const cellHeight = plateHeight(cell.plateFraction, layerHeight);
-        const cx = (x - (grid.width - 1) / 2) * STUD_PITCH;
-        const cy = (y - (grid.height - 1) / 2) * STUD_PITCH;
+        const cellHeight = plateHeight(cell.plateFraction, layerHeight, pitch);
+        const cx = (x - (grid.width - 1) / 2) * pitch;
+        const cy = (y - (grid.height - 1) / 2) * pitch;
         const cz = layerBase + cellHeight / 2;
         // How wide this cell is ALONG ITS OWN AXIS — see Cell.widthFraction's own doc. Only
         // meaningful (and only ever narrower than a full stud) for an axis-aware cell whose axis is
@@ -751,8 +777,8 @@ export async function buildGridGeometry(
         // PLATE_WIDTH_FRACTION_ORDER); this covers an older or hand-edited project too.
         const axisSpan =
           cell.widthFraction && (cell.axis === "x" || cell.axis === "y")
-            ? Math.min(STUD_PITCH, fixedPlateHeight(cell.widthFraction) ?? STUD_PITCH)
-            : STUD_PITCH;
+            ? Math.min(pitch, fixedPlateHeight(cell.widthFraction, pitch) ?? pitch)
+            : pitch;
         // A narrowed cell keeps the face OPPOSITE its connector/bore direction flush at the
         // normal full-stud cell boundary — that's the face a neighbouring cell's own full-width
         // face butts up against, so the two still join solidly — and pulls material in only from
@@ -762,7 +788,7 @@ export async function buildGridGeometry(
         // shared boundary. `s` mirrors the same flip sign the connector/box-placement code below
         // uses for which way it protrudes/opens.
         const widthSign = (cell.flip ?? false) ? -1 : 1;
-        const widthOffset = axisSpan !== STUD_PITCH ? (widthSign * (axisSpan - STUD_PITCH)) / 2 : 0;
+        const widthOffset = axisSpan !== pitch ? (widthSign * (axisSpan - pitch)) / 2 : 0;
         const bx = cell.axis === "x" ? cx + widthOffset : cx;
         const by = cell.axis === "y" ? cy + widthOffset : cy;
 
@@ -794,8 +820,8 @@ export async function buildGridGeometry(
             segAxis === "z"
               ? height
               : widthFraction
-                ? Math.min(STUD_PITCH, fixedPlateHeight(widthFraction) ?? STUD_PITCH)
-                : STUD_PITCH;
+                ? Math.min(pitch, fixedPlateHeight(widthFraction, pitch) ?? pitch)
+                : pitch;
 
           // Two cells only fuse into one run if they're the SAME piece type (a Pin piece and an
           // Axle piece never merge, even placed end to end) and the SAME axis. x/y runs also need
@@ -826,7 +852,7 @@ export async function buildGridGeometry(
             const nLi = li + step;
             if (nLi < 0 || nLi >= grid.layers.length) return { cell: undefined, height: 0 };
             const otherCell = grid.layers[nLi][indexOf(grid, x, y)];
-            return { cell: otherCell, height: plateHeight(otherCell.plateFraction, layerHeights[nLi]) };
+            return { cell: otherCell, height: plateHeight(otherCell.plateFraction, layerHeights[nLi], layerPitch(grid, nLi)) };
           };
 
           const behind = neighborAt(-1);
@@ -852,9 +878,9 @@ export async function buildGridGeometry(
             internalBoundaries.push(runLength);
             runLength += pieceSpan(aheadCell.widthFraction, ahead.height);
             if (segAxis === "x") {
-              endCx = (x + step - (grid.width - 1) / 2) * STUD_PITCH;
+              endCx = (x + step - (grid.width - 1) / 2) * pitch;
             } else if (segAxis === "y") {
-              endCy = (y + step - (grid.height - 1) / 2) * STUD_PITCH;
+              endCy = (y + step - (grid.height - 1) / 2) * pitch;
             } else {
               endLayerBase = layerBases[li + step];
               endCellHeight = ahead.height;
@@ -891,11 +917,14 @@ export async function buildGridGeometry(
               ? [{ offset: 0 }]
               : internalBoundaries.length === 1
                 ? [{ offset: internalBoundaries[0] - runLength / 2 }]
-                : internalBoundaries.map((boundary) => ({ offset: boundary - runLength / 2, radius: PIN_COLLAR_RADIUS_REDUCED }));
+                : internalBoundaries.map((boundary) => ({
+                    offset: boundary - runLength / 2,
+                    radius: PIN_COLLAR_RADIUS_REDUCED * connectorScale,
+                  }));
           const segment =
             pieceType === CellType.PinPiece
-              ? (await buildPinGeometry({ length: runLength, axis: segAxis, collars })).clone()
-              : axleRodGeometry(runLength + CELL_OVERLAP, segAxis).clone();
+              ? (await buildPinGeometry({ length: runLength, axis: segAxis, collars, scale: connectorScale })).clone()
+              : axleRodGeometry(runLength + CELL_OVERLAP, segAxis, connectorScale).clone();
           segment.translate(midX, midY, midZ);
           bodyParts.push(segment);
           continue;
@@ -908,15 +937,15 @@ export async function buildGridGeometry(
           // rather than silently mis-inset a narrowed face. Uncommon combination; flagged rather
           // than either one quietly overriding the other.
           const ext = cellExteriorFaces(layer, grid.width, grid.height, x, y, li === 0, li === grid.layers.length - 1);
-          box = insetCellBox(cx, cy, cz, cellHeight, ext, grid.partClearance);
-        } else if (axisSpan !== STUD_PITCH && cell.axis === "x") {
-          box = new THREE.BoxGeometry(axisSpan + CELL_OVERLAP, STUD_PITCH + CELL_OVERLAP, cellHeight);
+          box = insetCellBox(cx, cy, cz, cellHeight, ext, grid.partClearance, pitch);
+        } else if (axisSpan !== pitch && cell.axis === "x") {
+          box = new THREE.BoxGeometry(axisSpan + CELL_OVERLAP, pitch + CELL_OVERLAP, cellHeight);
           box.translate(bx, by, cz);
-        } else if (axisSpan !== STUD_PITCH && cell.axis === "y") {
-          box = new THREE.BoxGeometry(STUD_PITCH + CELL_OVERLAP, axisSpan + CELL_OVERLAP, cellHeight);
+        } else if (axisSpan !== pitch && cell.axis === "y") {
+          box = new THREE.BoxGeometry(pitch + CELL_OVERLAP, axisSpan + CELL_OVERLAP, cellHeight);
           box.translate(bx, by, cz);
         } else {
-          box = boxGeometry(STUD_PITCH + CELL_OVERLAP, STUD_PITCH + CELL_OVERLAP, cellHeight).clone();
+          box = boxGeometry(pitch + CELL_OVERLAP, pitch + CELL_OVERLAP, cellHeight).clone();
           box.translate(cx, cy, cz);
         }
 
@@ -953,11 +982,12 @@ export async function buildGridGeometry(
               adapters.push(
                 cellCapCylinder(
                   roundingAxisOf(neighbor),
-                  (nx - (grid.width - 1) / 2) * STUD_PITCH,
-                  (ny - (grid.height - 1) / 2) * STUD_PITCH,
+                  (nx - (grid.width - 1) / 2) * pitch,
+                  (ny - (grid.height - 1) / 2) * pitch,
                   layerBase,
-                  plateHeight(neighbor.plateFraction, layerHeight),
-                  STUD_PITCH * 2,
+                  plateHeight(neighbor.plateFraction, layerHeight, pitch),
+                  pitch * 2,
+                  pitch,
                 ),
               );
             };
@@ -976,6 +1006,7 @@ export async function buildGridGeometry(
               corners,
               undefined,
               adapters,
+              pitch,
             );
           }
         }
@@ -1037,6 +1068,7 @@ export async function buildGridGeometry(
             row,
             ring.hollow,
             ring.outerSquare,
+            pitch,
           );
         } else if (HOLE_TYPES.has(cell.type)) {
           const axis = cell.axis ?? "x";
@@ -1045,12 +1077,12 @@ export async function buildGridGeometry(
           const clearance = holeClearanceFor(grid, axis);
           const holeGeom =
             cell.type === CellType.TechnicHole
-              ? pinHoleGeometry(boreLength, axis, clearance)
+              ? pinHoleGeometry(boreLength, axis, clearance, connectorScale)
               : cell.type === CellType.StudHole
-                ? studHoleGeometry(boreLength, axis, clearance)
+                ? studHoleGeometry(boreLength, axis, clearance, connectorScale)
                 : cell.type === CellType.AxleHole
-                  ? axleHoleGeometry(boreLength, axis, clearance)
-                  : ballJointGeometry(boreLength, axis, flip);
+                  ? axleHoleGeometry(boreLength, axis, clearance, connectorScale)
+                  : ballJointGeometry(boreLength, axis, flip, connectorScale);
           const holeGeomClone = holeGeom.clone();
           holeGeomClone.translate(bx, by, cz);
 
@@ -1070,7 +1102,7 @@ export async function buildGridGeometry(
           assemblyCutters.push(holeGeomClone.clone());
 
           if (cell.type === CellType.BallJoint) {
-            const forkKeeper = (await ballSocketForkKeeperGeometry(boreLength, axis, flip)).clone();
+            const forkKeeper = (await ballSocketForkKeeperGeometry(boreLength, axis, flip, connectorScale, pitch)).clone();
             forkKeeper.translate(bx, by, cz);
             bodyPiece = await intersect(bodyPiece, forkKeeper);
           }
@@ -1086,7 +1118,7 @@ export async function buildGridGeometry(
             const axis = cell.axis ?? "z";
             const flip = cell.flip ?? false;
             const s = flip ? -1 : 1; // direction the male stud protrudes; the socket goes on -s
-            const socketDepth = STUD_HEIGHT + STUD_OVERLAP;
+            const socketDepth = studHeight + studOverlap;
             const extent = axis === "z" ? cellHeight : axisSpan;
             const axisCenter = axis === "x" ? bx : axis === "y" ? by : cz;
             const faceCoord = axisCenter - s * (extent / 2);
@@ -1098,7 +1130,7 @@ export async function buildGridGeometry(
             else if (axis === "y") sy = socketCoord;
             else sz = socketCoord;
 
-            const socketGeom = studHoleGeometry(socketDepth, axis, holeClearanceFor(grid, axis)).clone();
+            const socketGeom = studHoleGeometry(socketDepth, axis, holeClearanceFor(grid, axis), connectorScale).clone();
             socketGeom.translate(sx, sy, sz);
             bodyPiece = await subtract(bodyPiece, socketGeom);
           }
@@ -1115,7 +1147,7 @@ export async function buildGridGeometry(
           ];
           for (const [sx, sy, enabled] of cornerDirections) {
             if (!enabled) continue;
-            bodyPiece = await blendCornerToNeighbors(grid, layer, cellHeight, cz, cx, cy, x, y, sx, sy, bodyPiece);
+            bodyPiece = await blendCornerToNeighbors(grid, layer, cellHeight, cz, cx, cy, x, y, sx, sy, bodyPiece, pitch);
           }
         }
 
@@ -1147,19 +1179,19 @@ export async function buildGridGeometry(
             // full-stud box, so a narrowed rib bridges the gap with its own true (narrower)
             // cross-section instead of ballooning out to full stud width where it crosses into
             // the neighbour's cell.
-            bodyParts.push(...(await collectJoinBridges(grid, layer, x, y, cx, cy, cz, cellHeight, dx, dy, box)));
+            bodyParts.push(...(await collectJoinBridges(grid, layer, x, y, cx, cy, cz, cellHeight, dx, dy, box, pitch)));
           }
         }
 
         if (cell.type === CellType.Pin) {
           const axis = cell.axis ?? "x";
           const flip = cell.flip ?? false;
-          const pinLength = PIN_EMBED_LENGTH + PIN_PROTRUDE_LENGTH;
+          const pinLength = pinEmbedLength + pinProtrudeLength;
           // Centre offset (from the cell's outward face) so most of the pin sits embedded
           // inside the block (real overlap, safe to merge) and the rest protrudes beyond it. The
           // shaft itself is symmetric along its own length (see pin.ts), so flipping only needs to
           // mirror which face it attaches to — no need to rotate the pin's own geometry.
-          const centerOffset = (PIN_PROTRUDE_LENGTH - PIN_EMBED_LENGTH) / 2;
+          const centerOffset = (pinProtrudeLength - pinEmbedLength) / 2;
           const s = flip ? -1 : 1;
           let px = bx;
           let py = by;
@@ -1172,7 +1204,7 @@ export async function buildGridGeometry(
           // mating beam seats against, and it leaves the full protruding module clear to enter the
           // hole. `s` negates it when flipped, because flipping repositions this pin rather than
           // rotating it (see below) and the collar is the one feature that isn't symmetric.
-          const collarOffset = s * (PIN_EMBED_LENGTH - pinLength / 2);
+          const collarOffset = s * (pinEmbedLength - pinLength / 2);
 
           // PIN_COLLAR_RADIUS unconditionally, at full size, on every host cell regardless of its
           // own thickness — an earlier version here clamped (and, on a "½ module" cell, omitted
@@ -1189,6 +1221,7 @@ export async function buildGridGeometry(
               length: pinLength,
               axis,
               collarOffset,
+              scale: connectorScale,
             })
           ).clone();
           pinGeom.translate(px, py, pz);
@@ -1198,10 +1231,10 @@ export async function buildGridGeometry(
         if (cell.type === CellType.Axle) {
           const axis = cell.axis ?? "x";
           const flip = cell.flip ?? false;
-          const rodLength = PIN_EMBED_LENGTH + PIN_PROTRUDE_LENGTH;
+          const rodLength = pinEmbedLength + pinProtrudeLength;
           // Same centred-shaft placement as Pin — the rod's cross-section is uniform along its
           // whole length (no taper), so flipping only needs to mirror which face it attaches to.
-          const centerOffset = (PIN_PROTRUDE_LENGTH - PIN_EMBED_LENGTH) / 2;
+          const centerOffset = (pinProtrudeLength - pinEmbedLength) / 2;
           const s = flip ? -1 : 1;
           let px = bx;
           let py = by;
@@ -1210,7 +1243,7 @@ export async function buildGridGeometry(
           else if (axis === "y") py = by + s * (axisSpan / 2 + centerOffset);
           else pz = flip ? layerBase - centerOffset : layerBase + cellHeight + centerOffset;
 
-          const axleGeom = axleRodGeometry(rodLength, axis).clone();
+          const axleGeom = axleRodGeometry(rodLength, axis, connectorScale).clone();
           axleGeom.translate(px, py, pz);
           bodyParts.push(axleGeom);
         }
@@ -1218,9 +1251,9 @@ export async function buildGridGeometry(
         if (cell.type === CellType.BallPin) {
           const axis = cell.axis ?? "x";
           const flip = cell.flip ?? false;
-          const neckLength = PIN_EMBED_LENGTH + PIN_PROTRUDE_LENGTH;
-          const pos = connectorBasePosition(axis, bx, by, layerBase, cellHeight, PIN_EMBED_LENGTH, flip, axisSpan);
-          let ballPinGeom = (await buildBallPinGeometry({ neckLength, axis })).clone();
+          const neckLength = pinEmbedLength + pinProtrudeLength;
+          const pos = connectorBasePosition(axis, bx, by, layerBase, cellHeight, pinEmbedLength, flip, axisSpan);
+          let ballPinGeom = (await buildBallPinGeometry({ neckLength, axis, scale: connectorScale })).clone();
           if (flip) ballPinGeom = flip180(ballPinGeom, axis);
           ballPinGeom.translate(pos.x, pos.y, pos.z);
           bodyParts.push(ballPinGeom);
@@ -1229,10 +1262,10 @@ export async function buildGridGeometry(
         if (cell.type === CellType.Stud) {
           const axis = cell.axis ?? "z";
           const flip = cell.flip ?? false;
-          const studEmbed = STUD_OVERLAP;
-          const totalLength = studEmbed + STUD_HEIGHT;
+          const studEmbed = studOverlap;
+          const totalLength = studEmbed + studHeight;
           const pos = connectorBasePosition(axis, bx, by, layerBase, cellHeight, studEmbed, flip, axisSpan);
-          let studGeom = studConnectorGeometry(totalLength, axis).clone();
+          let studGeom = studConnectorGeometry(totalLength, axis, connectorScale).clone();
           if (flip) studGeom = flip180(studGeom, axis);
           studGeom.translate(pos.x, pos.y, pos.z);
           bodyParts.push(studGeom);
@@ -1255,7 +1288,8 @@ export async function buildGridGeometry(
   // at.
   const beamWidths = new Map<string, number>();
   for (const beam of grid.beams ?? []) {
-    beamWidths.set(beam.id, Math.min(STUD_PITCH, fixedPlateHeight(beam.widthFraction) ?? STUD_PITCH));
+    const bp = layerPitch(grid, beam.layer);
+    beamWidths.set(beam.id, Math.min(bp, fixedPlateHeight(beam.widthFraction, bp) ?? bp));
   }
 
   for (const beam of grid.beams ?? []) {
@@ -1263,11 +1297,13 @@ export async function buildGridGeometry(
     if (hiddenLayers?.has(beam.layer)) continue;
     if (beam.holes < 1) continue;
     const layerHeight = layerHeights[beam.layer];
-    const beamHeight = plateHeight(beam.plateFraction ?? "module", layerHeight);
+    const beamPitch = layerPitch(grid, beam.layer);
+    const beamConnectorScale = layerConnectorScale(grid, beam.layer);
+    const beamHeight = plateHeight(beam.plateFraction ?? "module", layerHeight, beamPitch);
     // Clamped to a stud for the same reason a cell's own axisSpan is: the PlateFraction scale runs
     // past 8mm, which is fine as a height but as a WIDTH would make the beam wider than the hole
     // pattern it carries.
-    const beamWidth = Math.min(STUD_PITCH, fixedPlateHeight(beam.widthFraction) ?? STUD_PITCH);
+    const beamWidth = Math.min(beamPitch, fixedPlateHeight(beam.widthFraction, beamPitch) ?? beamPitch);
     const built = await buildAngledBeamGeometry(
       grid,
       beam,
@@ -1279,6 +1315,8 @@ export async function buildGridGeometry(
         beam,
         (grid.beams ?? []).filter((b) => b.layer === beam.layer && !hiddenLayers?.has(b.layer)),
       ),
+      beamPitch,
+      beamConnectorScale,
     );
     bodyParts.push(built.body);
     assemblyCutters.push(...built.throughCutters);
@@ -1290,7 +1328,7 @@ export async function buildGridGeometry(
     if (radius > 0) {
       const others = (grid.beams ?? [])
         .filter((b) => b.id !== beam.id && b.layer === beam.layer && !hiddenLayers?.has(b.layer))
-        .map((b) => ({ beam: b, width: beamWidths.get(b.id) ?? STUD_PITCH }));
+        .map((b) => ({ beam: b, width: beamWidths.get(b.id) ?? beamPitch }));
       const blend = await buildBeamJoinBlend(
         grid,
         beam,
@@ -1299,6 +1337,8 @@ export async function buildGridGeometry(
         beamWidth,
         radius,
         others,
+        beamPitch,
+        beamConnectorScale,
       );
       if (blend.fill) bodyParts.push(blend.fill);
       if (blend.carve) assemblyCutters.push(blend.carve);
@@ -1313,33 +1353,21 @@ export async function buildGridGeometry(
     if (hiddenLayers?.has(disc.layer)) continue;
     if (disc.slots < 1) continue;
     const layerHeight = layerHeights[disc.layer];
-    const discHeight = plateHeight(disc.plateFraction ?? "module", layerHeight);
-    const built = buildSlotDiscGeometry(grid, disc, layerBases[disc.layer], discHeight, layerHeight);
+    const discPitch = layerPitch(grid, disc.layer);
+    const discHeight = plateHeight(disc.plateFraction ?? "module", layerHeight, discPitch);
+    const built = buildSlotDiscGeometry(
+      grid,
+      disc,
+      layerBases[disc.layer],
+      discHeight,
+      layerHeight,
+      discPitch,
+      layerConnectorScale(grid, disc.layer),
+    );
     // The mouth ramps shape this disc and nothing else, so they are subtracted here rather than
     // added to the assembly-wide cutters — see buildSlotDiscGeometry.
     bodyParts.push(built.bodyCutters.length > 0 ? await subtract(built.body, await unionAll(built.bodyCutters)) : built.body);
     assemblyCutters.push(...built.throughCutters);
-  }
-
-  // If a corner cell has a hole/pin bore, the corner-rounding cut there must stay small enough
-  // not to breach the thin wall between that bore's own boss circle (centred at the cell's
-  // centre, STUD_PITCH/2 in from each edge) and the model's outer corner point. That distance is
-  // constant regardless of grid size — geometrically, the corner point to that cell-centre
-  // distance is (STUD_PITCH/2) * sqrt(2) — so the safe radius is that distance minus the boss
-  // radius minus a small margin, rather than skipping the corner outright.
-  const cornerToHoleCentre = (STUD_PITCH / 2) * Math.SQRT2;
-  const safeRadiusNearHole = Math.max(0, cornerToHoleCentre - PIN_HOLE_BOSS_RADIUS - CORNER_HOLE_MARGIN);
-  const cornerSafety: CornerSafety = { maxRadius: [] };
-  for (const [sx, sy] of [
-    [1, 1],
-    [1, -1],
-    [-1, 1],
-    [-1, -1],
-  ] as const) {
-    const cornerX = sx === 1 ? grid.width - 1 : 0;
-    const cornerY = sy === 1 ? grid.height - 1 : 0;
-    const hasHole = grid.layers.some((layer) => HOLE_TYPES.has(layer[indexOf(grid, cornerX, cornerY)].type));
-    if (hasHole) cornerSafety.maxRadius.push({ sx, sy, radius: safeRadiusNearHole });
   }
 
   if (bodyParts.length === 0) return new THREE.BufferGeometry();
@@ -1352,12 +1380,9 @@ export async function buildGridGeometry(
     geom = await subtract(geom, assemblyCutters.length === 1 ? assemblyCutters[0] : await unionAll(assemblyCutters));
   }
 
-  if (grid.rounding.corners) {
-    const widthMm = grid.width * STUD_PITCH;
-    const depthMm = grid.height * STUD_PITCH;
-    const totalHeightMm = layerHeights.reduce((sum, h) => sum + h, 0);
-    geom = await applyRounding(geom, widthMm, depthMm, totalHeightMm, grid.rounding, cornerSafety);
-  }
-
-  return geom;
+  // Last thing before the part leaves the builder, for both the viewport and the STL export: strip
+  // the zero-area slivers the booleans leave along coplanar seams. They shade black in the preview
+  // and are junk in an export — see dropDegenerateTriangles, including why this belongs here and
+  // not inside the CSG helpers themselves.
+  return dropDegenerateTriangles(geom);
 }

@@ -45,6 +45,9 @@ async function toManifold(geom: THREE.BufferGeometry): Promise<InstanceType<type
 }
 
 /** three's own `mergeVertices` needs an indexed *or* non-indexed source but always fine either way; this just guarantees an index exists, since Manifold's Mesh requires triVerts. */
+/** See dropDegenerateTriangles — the area (mm²) below which a triangle contributes no surface. */
+const DEGENERATE_AREA_EPSILON = 1e-7;
+
 function mergeToIndexed(geom: THREE.BufferGeometry): THREE.BufferGeometry {
   const position = geom.attributes.position;
   const count = position.count;
@@ -71,6 +74,62 @@ function fromManifold(manifold: InstanceType<typeof Manifold>): THREE.BufferGeom
   const flat = geom.toNonIndexed();
   flat.computeVertexNormals();
   return flat;
+}
+
+/**
+ * Removes triangles with no area — three collinear (or coincident) corners.
+ *
+ * Call this ONCE, on the finished part, and never on an intermediate result. manifold-3d pairs up
+ * half-edges to verify a mesh is closed, and a degenerate triangle still owns three of them, so a
+ * mesh with them stripped out is rejected outright (ManifoldError) the moment it is fed back into
+ * another boolean. Cleaning inside `fromManifold` — i.e. after every union and subtract — looks
+ * tidier and breaks the very next operation.
+ *
+ * manifold-3d emits a few of these wherever many coplanar faces are resolved against each other,
+ * which for this project is every large flat surface: cell boxes are built deliberately oversized
+ * so neighbours overlap (see CELL_OVERLAP), so an auto-filled plate's top face is one plane carved
+ * up by dozens of 0.05mm seams, and the retriangulation along them leaves the odd sliver that
+ * collapses to a line.
+ *
+ * They must go BEFORE computeVertexNormals, which is the only reason they are visible at all. A
+ * zero-area triangle has no cross product to normalise, so it gets a zero-length normal, and a
+ * zero-length normal shades BLACK under any light — a hairline dark nick sitting in the middle of
+ * an otherwise flat face. The solid itself was always correct; only its shading was wrong.
+ *
+ * Dropping them cannot open a hole: a triangle with no area covers no surface, so the boundary it
+ * "seals" is already sealed by its neighbours. It also makes for a better STL — degenerate facets
+ * are a common slicer complaint, and they were being written into the export too.
+ *
+ * The threshold is on area rather than edge length so a long thin sliver is judged by the surface
+ * it actually contributes. 1e-7 mm² is far below anything a printer or a renderer can resolve
+ * (a square a third of a micron on a side) while comfortably clear of float noise on a real face.
+ */
+export function dropDegenerateTriangles(geom: THREE.BufferGeometry): THREE.BufferGeometry {
+  const pos = geom.attributes.position;
+  const src = pos.array as ArrayLike<number>;
+  const kept: number[] = [];
+  for (let i = 0; i < src.length; i += 9) {
+    const ux = src[i + 3] - src[i];
+    const uy = src[i + 4] - src[i + 1];
+    const uz = src[i + 5] - src[i + 2];
+    const vx = src[i + 6] - src[i];
+    const vy = src[i + 7] - src[i + 1];
+    const vz = src[i + 8] - src[i + 2];
+    // Twice the area, via the cross product's magnitude — the halving is folded into the threshold.
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    if (Math.hypot(cx, cy, cz) < DEGENERATE_AREA_EPSILON * 2) continue;
+    for (let k = 0; k < 9; k++) kept.push(src[i + k]);
+  }
+  if (kept.length === src.length) return geom;
+  const cleaned = new THREE.BufferGeometry();
+  cleaned.setAttribute("position", new THREE.BufferAttribute(new Float32Array(kept), 3));
+  // Recomputed rather than copied across: the whole point is that the dropped triangles were
+  // poisoning the normals, and the surviving ones each still want their own flat face normal (see
+  // fromManifold on why non-indexed).
+  cleaned.computeVertexNormals();
+  return cleaned;
 }
 
 async function op(

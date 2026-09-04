@@ -71,6 +71,7 @@ export async function buildCircleSolidGeometry(
   row: number,
   hollow: boolean,
   outerSquare: boolean,
+  pitch: number = STUD_PITCH,
 ): Promise<THREE.BufferGeometry> {
   // This cell's TRUE centre, relative to the group's own centre. `row` is a top-down READING
   // index (row 0 = top of the group, like the on-screen picker) — but world +Y is "up" (GridEditor
@@ -79,8 +80,8 @@ export async function buildCircleSolidGeometry(
   // up positioned on the wrong side of the shared circle (curving inward instead of outward, since
   // the "kept" near-centre corner comes out mirrored top-to-bottom).
   const centerIndex = (dimension - 1) / 2;
-  const cellOffsetX = (col - centerIndex) * STUD_PITCH;
-  const cellOffsetY = (centerIndex - row) * STUD_PITCH;
+  const cellOffsetX = (col - centerIndex) * pitch;
+  const cellOffsetY = (centerIndex - row) * pitch;
   const groupCenterX = cx - cellOffsetX;
   const groupCenterY = cy - cellOffsetY;
 
@@ -92,7 +93,7 @@ export async function buildCircleSolidGeometry(
   } else {
     // Radius of the shared circle, centred on the whole group.
     // 2x2 -> 1 stud (8mm), 3x3 -> 1.5 studs (12mm), 4x4 -> 2 studs (16mm), 5x5 -> 2.5 studs (20mm)
-    const radiusMm = (dimension / 2) * STUD_PITCH + RADIUS_EPSILON;
+    const radiusMm = (dimension / 2) * pitch + RADIUS_EPSILON;
 
     // The shared circle, positioned in WORLD space at the group's own centre, using this cell's
     // TRUE grid centre rather than wherever a narrowed `box` itself got shifted to, so the curve's
@@ -119,7 +120,7 @@ export async function buildCircleSolidGeometry(
     // same tangency reason RADIUS_EPSILON exists: at dimension 2 the inner radius would otherwise
     // land EXACTLY on the cells' own shared centre corner, the known degenerate touch for this
     // project's CSG engine.
-    const innerRadiusMm = Math.max(0, ((dimension - 1) / 2) * STUD_PITCH - RADIUS_EPSILON);
+    const innerRadiusMm = Math.max(0, ((dimension - 1) / 2) * pitch - RADIUS_EPSILON);
     if (innerRadiusMm > 0) {
       // A cell close enough to the group's own centre (e.g. directly above/below the centre row
       // in a 5x5+ group) can have its ENTIRE box fall inside the hollow radius, not just a slice

@@ -522,6 +522,37 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; 
   background: var(--panel-3);
   overflow-x: auto;
 }
+
+/* The active layer's stud pitch / connector system. Sits at the end of the strip rather than in
+   the left-hand toolbar because it is a property of the LAYER, and the strip is where layers are
+   chosen — putting it beside the cell brushes would read as something the brush carries. */
+.layer-spacing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  flex-shrink: 0;
+  min-width: 190px;
+  max-width: 230px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+.layer-spacing .field {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+/* Only shown on a layer that isn't the plain 8mm default, so an all-Technic stack stays quiet. */
+.layer-pitch-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
 .layer-strip-container > .icon-btn {
   padding: 8px;
   flex-shrink: 0;
@@ -617,18 +648,9 @@ button[title]:hover::after {
   font-weight: 500;
 }
 
-/* Rounding panel */
-.rounding-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .toggle-row { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .toggle-row input[type="checkbox"], .toggle-row input[type="radio"] { width: 16px; height: 16px; accent-color: var(--accent); }
 
-.pin-preview {
-  height: 180px;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  margin-top: 10px;
-}
 
 /* Scrollbars */
 ::-webkit-scrollbar {

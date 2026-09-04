@@ -171,16 +171,19 @@ export const PLATE_FRACTION_INFO: Record<PlateFraction, PlateFractionInfo> = {
     description:
       "The default — one standard brick, 9.6mm (the same fixed size as \"3 plates\"; \"Full\" is just what a cell gets when nothing more specific is picked). This does NOT stretch to match a taller neighbour in the same layer — each cell's own height is fixed once painted; it's the LAYER's overall height that ends up as whichever of its cells is tallest.",
   },
+  // Every mm figure in this table is the 8mm system's — see plateFractionLabel/Description below,
+  // which is what the UI actually shows and which scales all of them with the layer's stud pitch.
+  // Anything reading this table directly still reads correctly for an 8mm layer.
   module: {
     label: "1 module (8mm)",
     shortLabel: "M",
     description:
-      "One Technic module — 8mm, the height of a real Technic beam/liftarm. Same as the stud pitch, so the cell is square in cross-section, which is what lets a rounded end sit flush with its own top and bottom faces instead of leaving a ledge.",
+      "One module — 8mm, the height of a real beam/liftarm. Same as the stud pitch, so the cell is square in cross-section, which is what lets a rounded end sit flush with its own top and bottom faces instead of leaving a ledge.",
   },
   halfModule: {
     label: "½ module (4mm)",
     shortLabel: "½M",
-    description: "Half a Technic module — 4mm, the thickness of a real thin (“x 0.5”) liftarm.",
+    description: "Half a module — 4mm, the thickness of a real thin (“x 0.5”) liftarm.",
   },
   "1": { label: "1 plate (3.2mm)", shortLabel: "1p", description: "A single standard plate — 3.2mm." },
   "2": { label: "2 plates (6.4mm)", shortLabel: "2p", description: "Two stacked standard plates — 6.4mm." },
@@ -197,6 +200,86 @@ export const PLATE_FRACTION_INFO: Record<PlateFraction, PlateFractionInfo> = {
   },
 };
 export const PLATE_FRACTION_ORDER: PlateFraction[] = ["full", "module", "halfModule", "1", "2", "3", "minimal"];
+
+// Kept local rather than imported from units.ts/geometry.ts: those import from here, and a cycle
+// through the cell-type tables is not worth a shared constant this small.
+const PLATE_HEIGHT_MM = 3.2;
+const DEFAULT_PITCH_MM = 8;
+
+/**
+ * A plate fraction's height in mm at a given stud pitch, or undefined for "minimal" (which has no
+ * fixed size — it resolves against whatever else is on its layer).
+ *
+ * Mirrors geometry.ts's `fixedPlateHeight`, which is what actually builds the cell. EVERY fraction
+ * scales with the pitch, plate fractions included: a 10mm system is the 8mm one scaled uniformly,
+ * so a plate is 4mm there and a brick 12mm.
+ */
+function plateFractionMm(fraction: PlateFraction, pitch: number): number | undefined {
+  const scale = pitch / DEFAULT_PITCH_MM;
+  switch (fraction) {
+    case "module":
+      return pitch;
+    case "halfModule":
+      return pitch / 2;
+    case "1":
+      return PLATE_HEIGHT_MM * scale;
+    case "2":
+      return PLATE_HEIGHT_MM * 2 * scale;
+    case "3":
+      return PLATE_HEIGHT_MM * 3 * scale;
+    case "minimal":
+      return undefined;
+    default:
+      return PLATE_HEIGHT_MM * 3 * scale;
+  }
+}
+
+/**
+ * A plate fraction's label at a given layer's own stud pitch — every figure it quotes is the
+ * height the cell will actually be built at, so a 10mm layer's picker reads 10mm / 4mm / 12mm
+ * rather than the 8mm system's numbers.
+ */
+export function plateFractionLabel(fraction: PlateFraction, pitch: number): string {
+  const mm = plateFractionMm(fraction, pitch);
+  if (mm === undefined) return PLATE_FRACTION_INFO[fraction].label; // "minimal" — no fixed size
+  const n = +mm.toFixed(2);
+  switch (fraction) {
+    case "module":
+      return `1 module (${n}mm)`;
+    case "halfModule":
+      return `½ module (${n}mm)`;
+    case "1":
+      return `1 plate (${n}mm)`;
+    case "2":
+      return `2 plates (${n}mm)`;
+    case "3":
+      return `3 plates (${n}mm)`;
+    default:
+      return `Full (${n}mm)`;
+  }
+}
+
+/** The matching description, for the same reason. */
+export function plateFractionDescription(fraction: PlateFraction, pitch: number): string {
+  const mm = plateFractionMm(fraction, pitch);
+  if (mm === undefined) return PLATE_FRACTION_INFO[fraction].description;
+  const n = +mm.toFixed(2);
+  const plate = +(PLATE_HEIGHT_MM * (pitch / DEFAULT_PITCH_MM)).toFixed(2);
+  switch (fraction) {
+    case "module":
+      return `One module — ${n}mm, the height of a real beam/liftarm. Same as this layer's stud pitch, so the cell is square in cross-section, which is what lets a rounded end sit flush with its own top and bottom faces instead of leaving a ledge.`;
+    case "halfModule":
+      return `Half a module — ${n}mm, the thickness of a real thin (“x 0.5”) liftarm.`;
+    case "1":
+      return `A single standard plate — ${n}mm.`;
+    case "2":
+      return `Two stacked standard plates — ${n}mm (${plate}mm each).`;
+    case "3":
+      return `Three stacked standard plates — ${n}mm. The same fixed size as "Full" — see its own description.`;
+    default:
+      return `The default — one standard brick, ${n}mm (the same fixed size as "3 plates"; "Full" is just what a cell gets when nothing more specific is picked). This does NOT stretch to match a taller neighbour in the same layer — each cell's own height is fixed once painted; it's the LAYER's overall height that ends up as whichever of its cells is tallest.`;
+  }
+}
 
 /**
  * The subset of PLATE_FRACTION_ORDER that's meaningful as a cell's WIDTH along its own connector

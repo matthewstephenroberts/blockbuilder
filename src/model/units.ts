@@ -5,6 +5,35 @@
 
 export const STUD_PITCH = 8;
 
+/**
+ * The stud pitch a layer uses when it doesn't say otherwise — the 8mm module.
+ *
+ * Pitch is per LAYER rather than per project (see GridState.layerPitches) because the case it
+ * exists for is an ADAPTER: one printed part whose lower half plugs into an 8mm system and whose
+ * upper half plugs into a 10mm one (metric sets built on a 10mm module). Layers of
+ * different pitch stay concentric — every world coordinate in this app is already derived as
+ * `(index - (count - 1) / 2) * pitch`, so a 10mm layer and an 8mm layer share a centre and simply
+ * spread their cells further apart around it.
+ *
+ * Only the LATTICE scales: cell spacing, cell body size, the Technic module height (a Technic
+ * block is one module cube, so a 10mm cell is 10mm tall at "module" height), circle-ring radii,
+ * beam hole spacing, disc radii. The CONNECTORS do not — a pin hole is PIN_HOLE_RADIUS and a pin
+ * shaft is PIN_SHAFT_RADIUS at either pitch, because the physical pin you push through them is the
+ * same part in both systems. Scaling the holes with the pitch would produce a part that fits
+ * neither.
+ */
+export const DEFAULT_STUD_PITCH = STUD_PITCH;
+
+/** The pitches a layer can be set to, in mm. */
+export const SUPPORTED_STUD_PITCHES = [8, 10] as const;
+export type StudPitch = (typeof SUPPORTED_STUD_PITCHES)[number];
+
+/** Coerces an arbitrary number (a hand-edited or older project file) to a pitch we can build. */
+export function normalizeStudPitch(pitch: number | undefined): number {
+  if (typeof pitch !== "number" || !Number.isFinite(pitch) || pitch <= 0) return DEFAULT_STUD_PITCH;
+  return pitch;
+}
+
 // A block's BODY is smaller than the pitch it sits on: an n-stud block measures
 // n * STUD_PITCH - BLOCK_BODY_UNDERSIZE across, so a row of them has a hairline between each pair
 // rather than binding. Sizing a pocket that a block has to drop into off the pitch instead of the
@@ -12,9 +41,9 @@ export const STUD_PITCH = 8;
 // makes two blocks side by side fit at all.
 export const BLOCK_BODY_UNDERSIZE = 0.2;
 
-/** The real across-the-flats size of an n-stud block body, in mm. */
-export function blockBodySizeMm(studs: number): number {
-  return studs * STUD_PITCH - BLOCK_BODY_UNDERSIZE;
+/** The real across-the-flats size of an n-stud block body, in mm, at a given stud pitch. */
+export function blockBodySizeMm(studs: number, pitch: number = STUD_PITCH): number {
+  return studs * pitch - BLOCK_BODY_UNDERSIZE;
 }
 export const PLATE_HEIGHT = 3.2;
 export const BRICK_HEIGHT = PLATE_HEIGHT * 3; // 9.6mm
@@ -28,6 +57,19 @@ export const BRICK_HEIGHT = PLATE_HEIGHT * 3; // 9.6mm
 // BRICK_HEIGHT stays correct for System-style bricks/plates.
 export const TECHNIC_MODULE_HEIGHT = STUD_PITCH; // 8mm
 export const TECHNIC_HALF_MODULE_HEIGHT = TECHNIC_MODULE_HEIGHT / 2; // 4mm — a thin "x 0.5" liftarm
+
+/**
+ * The same "one module tall / half a module tall" rule, at whatever pitch the layer runs at. A
+ * Technic block is a CUBE of its own module, so on a 10mm layer a full-height beam is 10mm tall,
+ * not 8mm — otherwise a 10mm-pitch beam stacked on another would sit at the wrong height, and its
+ * rounded end cap (radius = half the height) would stop being tangent to its own faces.
+ */
+export function technicModuleHeight(pitch: number = STUD_PITCH): number {
+  return pitch;
+}
+export function technicHalfModuleHeight(pitch: number = STUD_PITCH): number {
+  return pitch / 2;
+}
 
 export const STUD_RADIUS = 2.4;
 export const STUD_HEIGHT = 1.7;
@@ -182,4 +224,9 @@ export const CELL_OVERLAP = 0.1;
  * surface that actually gets built and leaves a lip along the join.
  */
 export const CELL_BUILT_HALF = (STUD_PITCH + CELL_OVERLAP) / 2;
+
+/** `CELL_BUILT_HALF` at a given layer's own stud pitch. */
+export function cellBuiltHalf(pitch: number = STUD_PITCH): number {
+  return (pitch + CELL_OVERLAP) / 2;
+}
 export const STUD_OVERLAP = 0.15;

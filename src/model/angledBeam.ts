@@ -1,6 +1,7 @@
 import { PlateFraction } from "./cellTypes";
 import {
   CELL_BUILT_HALF,
+  cellBuiltHalf,
   PIN_HOLE_BOSS_RADIUS,
   PIN_HOLE_RADIUS,
   STUD_HOLE_RADIUS,
@@ -329,23 +330,23 @@ export function beamEndIsFitted(beam: AngledBeam, end: "start" | "end"): boolean
 
 /** Where the beam's BODY starts and ends, in hole-spacings from the anchor along its own run.
  * The holes themselves live at `beamHoleOffsetStuds`. */
-export function beamBodySpanStuds(beam: AngledBeam): { from: number; to: number } {
+export function beamBodySpanStuds(beam: AngledBeam, pitch: number = STUD_PITCH): { from: number; to: number } {
   const lead = beamLeadIn(beam);
   const rounded = beam.roundedEnds ?? true;
   // An unfitted square end still needs its half-stud of material past the end hole; a rounded one
   // gets that from the cap. Same rule the geometry builder uses, kept here so the 2D overlay draws
   // the body the length it will actually print.
-  const extStart = lead.start > 0 ? lead.start : rounded ? 0 : STUD_PITCH / 2;
-  const extEnd = lead.end > 0 ? lead.end : rounded ? 0 : STUD_PITCH / 2;
+  const extStart = lead.start > 0 ? lead.start : rounded ? 0 : pitch / 2;
+  const extEnd = lead.end > 0 ? lead.end : rounded ? 0 : pitch / 2;
   return {
-    from: (lead.start - extStart) / STUD_PITCH,
-    to: (lead.start + beamSpans(beam) * STUD_PITCH + extEnd) / STUD_PITCH,
+    from: (lead.start - extStart) / pitch,
+    to: (lead.start + beamSpans(beam) * pitch + extEnd) / pitch,
   };
 }
 
 /** How far hole `index` sits from the anchor, in hole-spacings along the beam's own run. */
-export function beamHoleOffsetStuds(beam: AngledBeam, index: number): number {
-  return beamLeadIn(beam).start / STUD_PITCH + index;
+export function beamHoleOffsetStuds(beam: AngledBeam, index: number, pitch: number = STUD_PITCH): number {
+  return beamLeadIn(beam).start / pitch + index;
 }
 
 /** The unit vector the beam runs along, in grid storage coords (Y matching `anchorY`). */
@@ -373,11 +374,11 @@ export const BEAM_END_HOLE_MATERIAL: Record<BeamHoleType, number> = {
 
 /** How much material sits between the given end's hole centre and the body's end face, in mm —
  * `Infinity` for a rounded end, whose cap is concentric with that hole and so always encloses it. */
-function endHoleMaterial(beam: AngledBeam, end: "start" | "end"): number {
+function endHoleMaterial(beam: AngledBeam, end: "start" | "end", pitch: number = STUD_PITCH): number {
   const lead = beamLeadIn(beam);
   const at = end === "start" ? lead.start : lead.end;
   if (at > 0) return at;
-  return (beam.roundedEnds ?? true) ? Infinity : STUD_PITCH / 2;
+  return (beam.roundedEnds ?? true) ? Infinity : pitch / 2;
 }
 
 /**
@@ -431,13 +432,13 @@ export function beamSuppressedHoles(beam: AngledBeam): number[] {
  * from the edge, with no wall at all.
  */
 /** Where every hole of a beam sits, in grid (stud) coordinates — fractional, and rarely on a cell. */
-export function beamHolePositions(beam: AngledBeam): { x: number; y: number }[] {
+export function beamHolePositions(beam: AngledBeam, pitch: number = STUD_PITCH): { x: number; y: number }[] {
   const dir = beamDirection(beam);
   const perp = { x: -dir.y, y: dir.x };
-  const across = (beam.acrossOffset ?? 0) / STUD_PITCH;
+  const across = (beam.acrossOffset ?? 0) / pitch;
   const out: { x: number; y: number }[] = [];
   for (let i = 0; i < beam.holes; i++) {
-    const along = beamHoleOffsetStuds(beam, i);
+    const along = beamHoleOffsetStuds(beam, i, pitch);
     out.push({
       x: beam.anchorX + dir.x * along + perp.x * across,
       y: beam.anchorY + dir.y * along + perp.y * across,
@@ -666,6 +667,7 @@ export function beamFitToEndpoint(
    * caller's to say.
    */
   mode: BeamFitMode = "body",
+  pitch: number = STUD_PITCH,
 ): Pick<AngledBeam, "angleId" | "customDegrees" | "mirror" | "reverse" | "holes" | "leadInStart" | "leadInEnd" | "endpoint"> | null {
   const dx = bx - ax;
   const dy = by - ay;
@@ -679,21 +681,21 @@ export function beamFitToEndpoint(
   // `centred` never takes the exact branch: its whole point is a hole on the midpoint, and the
   // exact fit's count (spacings + 1) is even exactly when that would fail.
   const exact = mode !== "centred" && (mode === "holes" || Math.abs(studs - Math.round(studs)) < 1e-9);
-  const length = studs * STUD_PITCH;
+  const length = studs * pitch;
   // Rounding alone can leave as little as 2mm at each end (the slack lands anywhere in 4…12mm),
   // which is less than a Technic hole's own 3.2mm counterbore — the end holes then break out
   // through the end faces and print as open notches. So the hole count is also capped at what
   // leaves BOTH ends their wall; one hole fewer buys 4mm at each end, which is always enough.
   const need = BEAM_END_HOLE_MATERIAL[holeType];
-  const fits = Math.floor((length - 2 * need) / STUD_PITCH) + 1;
+  const fits = Math.floor((length - 2 * need) / pitch) + 1;
   let holes = exact
     ? Math.round(studs) + 1
-    : Math.max(1, Math.min(Math.round(length / STUD_PITCH), fits));
+    : Math.max(1, Math.min(Math.round(length / pitch), fits));
   // Dropping to the next odd count DOWN, never up: one hole fewer only ever buys 4mm more lead-in
   // at each end, while one more could take the end holes past what BEAM_END_HOLE_MATERIAL leaves
   // them — the cap above exists for that.
   if (mode === "centred" && holes % 2 === 0) holes = Math.max(1, holes - 1);
-  const lead = exact ? 0 : (length - (holes - 1) * STUD_PITCH) / 2;
+  const lead = exact ? 0 : (length - (holes - 1) * pitch) / 2;
   return {
     angleId: CUSTOM_ANGLE_ID,
     // The quadrant flags reach any direction from a first-quadrant preset (see BEAM_QUADRANTS);
@@ -770,13 +772,14 @@ export function beamFlushOffset(
    * triangle drawn on solid cells, which sits flush.
    */
   others: readonly { beam: AngledBeam; width: number }[] = [],
+  pitch: number = STUD_PITCH,
 ): number | null {
   const dir = beamDirection(beam);
   const perp = { x: -dir.y, y: dir.x };
-  const body = beamBodySpanStuds(beam);
+  const body = beamBodySpanStuds(beam, pitch);
   const offsets: number[] = [];
 
-  const holes = beamHolePositions(beam);
+  const holes = beamHolePositions(beam, pitch);
   for (const end of ["start", "end"] as const) {
     const along = end === "start" ? body.from : body.to;
     const cx = Math.round(beam.anchorX + dir.x * along);
@@ -831,7 +834,7 @@ export function beamFlushOffset(
     // rather than just easing four corners. Treating it as corners inset by the radius instead
     // leaves the wall a fraction outside the tangent — 4.071mm from the centre of a 4mm circle.
     const round = Math.max(0, Math.min(roundRadiusAt(cx, cy), CELL_BUILT_HALF));
-    const c = round > 0 ? 0 : CELL_BUILT_HALF / STUD_PITCH;
+    const c = round > 0 ? 0 : cellBuiltHalf(pitch) / pitch;
     let extreme: number | null = null;
     for (const [sx, sy] of [
       [c, c],
@@ -839,8 +842,8 @@ export function beamFlushOffset(
       [-c, c],
       [-c, -c],
     ]) {
-      const dx = (cx + sx - beam.anchorX) * STUD_PITCH;
-      const dy = (cy + sy - beam.anchorY) * STUD_PITCH;
+      const dx = (cx + sx - beam.anchorX) * pitch;
+      const dy = (cy + sy - beam.anchorY) * pitch;
       const across = dx * perp.x + dy * perp.y;
       if (extreme === null || across * outer > extreme * outer) extreme = across;
     }
@@ -863,12 +866,17 @@ export function beamFlushOffset(
  * An in-plane cap is deliberately square here: it rounds top-to-bottom and leaves the plan outline
  * flat, which is exactly the difference that lets one beam's end overhang another's.
  */
-export function beamPlanOutline(beam: AngledBeam, widthStuds: number, joinedEnds?: { start: boolean; end: boolean }): { x: number; y: number }[] {
+export function beamPlanOutline(
+  beam: AngledBeam,
+  widthStuds: number,
+  joinedEnds?: { start: boolean; end: boolean },
+  pitch: number = STUD_PITCH,
+): { x: number; y: number }[] {
   const dir = beamDirection(beam);
   const perp = { x: -dir.y, y: dir.x };
-  const body = beamBodySpanStuds(beam);
+  const body = beamBodySpanStuds(beam, pitch);
   const lead = beamLeadIn(beam);
-  const across = (beam.acrossOffset ?? 0) / STUD_PITCH;
+  const across = (beam.acrossOffset ?? 0) / pitch;
   const hw = widthStuds / 2;
   const at = (along: number, over: number) => ({
     x: beam.anchorX + dir.x * along + perp.x * (over + across),

@@ -21,17 +21,19 @@ import {
 } from "../model/angledBeam";
 import {
   AXIS_SETTABLE_TYPES,
+  CELL_TYPE_INFO,
   BLEND_AWARE_TYPES,
   CellType,
   FLIP_AWARE_TYPES,
   HoleAxis,
-  PLATE_FRACTION_INFO,
+  plateFractionDescription,
+  plateFractionLabel,
   PLATE_FRACTION_ORDER,
   PLATE_WIDTH_FRACTION_ORDER,
   PlateFraction,
 } from "../model/cellTypes";
 import { fixedPlateHeight } from "../model/geometry";
-import { getCell, GridState } from "../model/grid";
+import { getCell, GridState, layerPitch } from "../model/grid";
 import {
   autoRingRadiusStuds,
   DiscBore,
@@ -40,6 +42,7 @@ import {
   DiscChamferSides,
   effectiveChamferMm,
   MAX_CHAMFER_FRACTION,
+  floorThicknessMm,
   pocketDepthMm,
   fittingHollowRing,
   isSlotOpen,
@@ -59,7 +62,6 @@ import {
   slotWallMm,
   withSlotOpen,
 } from "../model/slotDisc";
-import { PLATE_HEIGHT, STUD_PITCH } from "../model/units";
 import { BeamFitSetting, FlipSetting, ToolMode } from "../state/useProjectStore";
 import { CircleRing } from "../model/circleRing";
 
@@ -225,16 +227,19 @@ function DiscReadout({
   disc,
   partClearance,
   thicknessMm,
+  pitch,
 }: {
   disc: SlotDisc;
   partClearance: number;
+  /** The disc's layer's own stud pitch — every mm figure below is quoted at it. */
+  pitch: number;
   /** The disc's own thickness, or undefined for the "minimal" height, which has no fixed value. */
   thicknessMm: number | undefined;
 }) {
-  const wall = slotWallMm(disc);
+  const wall = slotWallMm(disc, pitch);
   // Roughly an axle's own outer reach; only used to say whether the hub is thin, so the exact
   // bore profile doesn't matter here.
-  const hub = hubWallMm(disc, disc.bore === "none" ? 0 : 3);
+  const hub = hubWallMm(disc, disc.bore === "none" ? 0 : 3, pitch);
   const problems: string[] = [];
   if (wall < MIN_SLOT_WALL) {
     problems.push(
@@ -255,8 +260,8 @@ function DiscReadout({
   // itself needs. That is invisible otherwise — the panel would just show a size nobody asked for
   // and no setting that explains it.
   if (disc.outerShape === "square") {
-    const raw = unsnappedOuterRadiusMm(disc, partClearance);
-    const snapped = outerRadiusMm(disc, partClearance);
+    const raw = unsnappedOuterRadiusMm(disc, partClearance, pitch);
+    const snapped = outerRadiusMm(disc, partClearance, pitch);
     if (snapped > raw + 0.05) {
       problems.push(
         `Squared off to ${(snapped * 2).toFixed(1)}mm so its edge lands on a cell boundary — the ring itself only needs ${(
@@ -272,10 +277,10 @@ function DiscReadout({
       `Only ${gap.toFixed(2)}mm of room per side around the block. A printed pocket comes out undersized and its corners are rounded by the nozzle — under about 0.25mm a block tends to bind rather than drop. Raise Slot clearance.`,
     );
   }
-  const housing = fittingHollowRing(disc, partClearance);
+  const housing = fittingHollowRing(disc, partClearance, pitch);
   const open = openSlotCount(disc);
   if (open === 0) problems.push("Every position is closed — this disc is a plain ring with no pockets at all.");
-  const floorMm = Math.max(0, disc.floorPlates) * PLATE_HEIGHT;
+  const floorMm = floorThicknessMm(disc, pitch);
   if (thicknessMm !== undefined && floorMm >= thicknessMm) {
     problems.push(
       `The pocket floor (${floorMm.toFixed(1)}mm) is as thick as the whole disc (${thicknessMm.toFixed(1)}mm), so the pockets aren't cut at all. Make the disc thicker under Plate height, or the floor thinner.`,
@@ -287,7 +292,7 @@ function DiscReadout({
   // typed — a request far larger than the plate can take is clamped, silently otherwise.
   // Exactly what the geometry computes, via the same helper — the two used to derive the depth
   // differently and disagree about how much was actually cut.
-  const cutChamfer = thicknessMm === undefined ? 0 : effectiveChamferMm(disc, pocketDepthMm(disc, thicknessMm));
+  const cutChamfer = thicknessMm === undefined ? 0 : effectiveChamferMm(disc, pocketDepthMm(disc, thicknessMm, pitch));
   if (askedChamfer > 0 && thicknessMm !== undefined && cutChamfer < askedChamfer - 0.005) {
     problems.push(
       `Mouth chamfer clamped to ${cutChamfer.toFixed(2)}mm (you asked for ${askedChamfer}mm) — a ramp can't take more than ${Math.round(MAX_CHAMFER_FRACTION * 100)}% of the pocket's depth, or there'd be no straight section left to hold a block.`,
@@ -552,6 +557,9 @@ export default function Toolbar({
   selectedDisc,
   onRemoveDisc,
 }: Props) {
+  // The layer being edited sets the scale every mm figure in this panel is quoted at — a circle
+  // group's radius, a beam's hole miss — since all of them are lattice measurements.
+  const activePitch = layerPitch(grid, grid.activeLayer);
   // The Edit tool adjusts whatever's already painted — but only the SPECIFIC cell currently
   // selected (a plain click loads one cell's own settings; see useProjectStore's selectCell), so
   // each picker's relevance while editing should follow that cell's own type, not stay
@@ -627,6 +635,30 @@ export default function Toolbar({
   // cell, so whatever they happen to be left at reads as the properties of something selected.
   // That's how a stray value gets attributed to a cell that was never selected at all.
   const editingNothing = tool === "edit" && !selectedCell && !selectedBeam && !selectedDisc && !selectedCircle;
+
+  // The heading-and-blurb that opens the panel for a plain CELL brush, matching the one the beam
+  // and disc brushes already get. Those two earned theirs by being placed differently from
+  // everything else, but the effect was that the panel introduced itself for exactly two brushes
+  // and said nothing for the other twelve — so the pickers below appeared with no statement of
+  // what was about to be painted. The text is CELL_TYPE_INFO's own description, which already
+  // existed for every type as a tooltip; this just puts it where it doesn't need hunting for.
+  //
+  // Suppressed for the beam and disc (they render their own), and when nothing is selected in Edit
+  // mode (the "Nothing selected" note above is the right message there, and a type heading would
+  // contradict it by naming a cell that isn't chosen).
+  const introType = tool === "edit" ? editingType : brush;
+  const cellIntro =
+    beamMode || discMode || editingNothing || introType === undefined
+      ? null
+      : {
+          title: CELL_TYPE_INFO[introType].label,
+          body:
+            tool === "edit"
+              ? `Editing the selected cell — every change here applies to it straight away. ${CELL_TYPE_INFO[introType].description}`
+              : introType === CellType.Empty
+                ? "Click or drag in the plan below to erase — this clears a cell back to empty, leaving a hole through the tile at that square."
+                : `${CELL_TYPE_INFO[introType].description} Click or drag in the plan below to paint it; the settings underneath apply to what you paint.`,
+        };
 
   return (
     <div className="card">
@@ -710,7 +742,7 @@ export default function Toolbar({
             <button
               className={`brush-btn${discSettings.ringRadiusStuds !== undefined ? " active" : ""}`}
               onClick={() =>
-                onDiscSettingsChange({ ringRadiusStuds: Number(autoRingRadiusStuds(discPreview).toFixed(2)) })
+                onDiscSettingsChange({ ringRadiusStuds: Number(autoRingRadiusStuds(discPreview, activePitch).toFixed(2)) })
               }
               title="Set the ring radius by hand — to line the pockets up with something else, or to leave a bigger hub."
             >
@@ -929,10 +961,15 @@ export default function Toolbar({
             </>
           )}
 
-          <DiscReadout disc={discPreview} partClearance={grid.partClearance} thicknessMm={fixedPlateHeight(plateFraction)} />
+          <DiscReadout
+            disc={discPreview}
+            partClearance={grid.partClearance}
+            thicknessMm={fixedPlateHeight(plateFraction, activePitch)}
+            pitch={activePitch}
+          />
           {(() => {
-            const housing = fittingHollowRing(discPreview, grid.partClearance);
-            const fittedRim = rimForRingFit(discPreview, housing.dimension, grid.partClearance);
+            const housing = fittingHollowRing(discPreview, grid.partClearance, activePitch);
+            const fittedRim = rimForRingFit(discPreview, housing.dimension, grid.partClearance, activePitch);
             if (Math.abs(fittedRim - discSettings.rimMm) < 0.05) return null;
             return (
               <button
@@ -1143,7 +1180,7 @@ export default function Toolbar({
                 style={{ marginTop: 8, color: "#ef4444" }}
               >
                 ⚠ Hole {miss.index + 1} won&apos;t pin: another beam&apos;s hole is{" "}
-                {(miss.gap * STUD_PITCH).toFixed(2)}mm away rather than through this one. A corner
+                {(miss.gap * activePitch).toFixed(2)}mm away rather than through this one. A corner
                 only closes when the run between the two holes is a whole number of studs — a right
                 isoceles triangle can never manage it, because its hypotenuse is √2 times a leg.
                 Pythagorean legs do: 3-4-5, 6-8-10, 5-12-13.
@@ -1226,9 +1263,18 @@ export default function Toolbar({
         </>
       )}
 
-      {showAxisPicker && (
+      {cellIntro && (
         <>
           <div className="card-head">
+            <h2>{cellIntro.title}</h2>
+          </div>
+          <p className="muted sm">{cellIntro.body}</p>
+        </>
+      )}
+
+      {showAxisPicker && (
+        <>
+          <div className="card-head" style={{ marginTop: 16 }}>
             <h2>
               {tool === "edit"
                 ? "Axis"
@@ -1299,9 +1345,9 @@ export default function Toolbar({
                 key={f}
                 className={`brush-btn${plateFraction === f ? " active" : ""}`}
                 onClick={() => onPlateFractionChange(f)}
-                title={PLATE_FRACTION_INFO[f].description}
+                title={plateFractionDescription(f, activePitch)}
               >
-                {PLATE_FRACTION_INFO[f].label}
+                {plateFractionLabel(f, activePitch)}
               </button>
             ))}
           </div>
@@ -1340,11 +1386,11 @@ export default function Toolbar({
                   disabled={!widthPickerEnabled}
                   title={
                     widthPickerEnabled
-                      ? "Full width (8mm) — the cell fills the whole stud pitch across its connector axis, same as every other cell. Note this is a DIFFERENT 'Full' from Plate height's own Full (9.6mm) above — width's ceiling is one stud (8mm), height's is one brick (9.6mm), so the same word means a different size in each picker."
+                      ? `Full width (${activePitch}mm) — the cell fills the whole stud pitch across its connector axis, same as every other cell. Note this is a DIFFERENT 'Full' from Plate height's own Full (9.6mm) above — width's ceiling is one stud (${activePitch}mm), height's is one brick (9.6mm), so the same word means a different size in each picker.`
                       : "Not available for Z-axis cells. Select X or Y axis to enable."
                   }
                 >
-                  Full (8mm)
+                  Full ({activePitch}mm)
                 </button>
                 {PLATE_WIDTH_FRACTION_ORDER.map((f) => (
                   <button
@@ -1354,11 +1400,11 @@ export default function Toolbar({
                     disabled={!widthPickerEnabled}
                     title={
                       widthPickerEnabled
-                        ? `Narrows the cell along its own ${axis.toUpperCase()} (connector) axis to ${PLATE_FRACTION_INFO[f].description.toLowerCase()}`
+                        ? `Narrows the cell along its own ${axis.toUpperCase()} (connector) axis to ${plateFractionDescription(f, activePitch).toLowerCase()}`
                         : "Not available for Z-axis cells. Select X or Y axis to enable."
                     }
                   >
-                    {PLATE_FRACTION_INFO[f].label}
+                    {plateFractionLabel(f, activePitch)}
                   </button>
                 ))}
               </div>
@@ -1510,7 +1556,7 @@ export default function Toolbar({
             <h2>Circle Dimension</h2>
           </div>
           <p className="muted sm">
-            Group size — an N x N block of cells sharing one circle, {STUD_PITCH}mm radius per stud
+            Group size — an N x N block of cells sharing one circle, {activePitch}mm radius per stud
             of N. Any size works (not just 2-5); bigger groups need more cells around the rim before
             the curve reads as smooth rather than blocky.
           </p>
@@ -1558,7 +1604,7 @@ export default function Toolbar({
               +
             </button>
             <span className="muted sm">
-              {circleDimension}x{circleDimension} · {((circleDimension / 2) * STUD_PITCH).toFixed(1)}mm radius
+              {circleDimension}x{circleDimension} · {((circleDimension / 2) * activePitch).toFixed(1)}mm radius
             </span>
           </div>
 

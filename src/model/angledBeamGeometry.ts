@@ -15,7 +15,7 @@ import { footprintBlend, subtract, unionAll } from "./csg";
 import { CircleRing } from "./circleRing";
 import { Cell, GridState, inBounds, indexOf } from "./grid";
 import { axleHoleGeometry, boxGeometry, pinHoleGeometry, studHoleGeometry } from "./primitives";
-import { CELL_BUILT_HALF, CELL_OVERLAP, CUT_EPSILON, PIN_HOLE_BOSS_RADIUS, STUD_PITCH } from "./units";
+import { cellBuiltHalf, CELL_OVERLAP, CUT_EPSILON, PIN_HOLE_BOSS_RADIUS, STUD_PITCH } from "./units";
 import { CELL_EDGE_RADIUS } from "./rounding";
 
 /**
@@ -67,7 +67,7 @@ const BORE_BREAKOUT = 0.05;
  * holeClearanceFor.
  */
 export async function buildAngledBeamGeometry(
-  grid: Pick<GridState, "width" | "height" | "holeClearance" | "sidewaysHoleClearance" | "layers" | "rounding">,
+  grid: Pick<GridState, "width" | "height" | "holeClearance" | "sidewaysHoleClearance" | "layers">,
   beam: AngledBeam,
   layerBase: number,
   beamHeight: number,
@@ -81,9 +81,13 @@ export async function buildAngledBeamGeometry(
    * the two beams' caps coincide instead of one standing proud of the other.
    */
   joinedEnds: { start: boolean; end: boolean } = { start: false, end: false },
+  /** The beam's layer's own lattice pitch — its hole spacing and cap radii follow it. */
+  pitch: number = STUD_PITCH,
+  /** The beam's layer's own connector scale — its BORES follow it, independently of `pitch`. */
+  connectorScale = 1,
 ): Promise<{ body: THREE.BufferGeometry; throughCutters: THREE.BufferGeometry[] }> {
   const span = beamSpans(beam);
-  const runLength = span * STUD_PITCH;
+  const runLength = span * pitch;
   const rounded = beam.roundedEnds ?? true;
   const halfHeight = beamHeight / 2;
 
@@ -109,16 +113,16 @@ export async function buildAngledBeamGeometry(
   // Only where the end hangs in air. An end buried in the block it lands on keeps its flat face:
   // the cap would be invisible inside the material, and the end blend wants a straight wall to sit
   // its fillet against.
-  const bodySpan = beamBodySpanStuds(beam);
+  const bodySpan = beamBodySpanStuds(beam, pitch);
   const stadiumStart = rounded && lead.start > 0 && !beamEndIsBuried(grid, beam, bodySpan.from);
   const stadiumEnd = rounded && lead.end > 0 && !beamEndIsBuried(grid, beam, bodySpan.to);
   // How far the body runs PAST each end hole: its lead-in when there is one, and otherwise the
   // half-stud a square end needs (a rounded one gets its material from the cap, and only overlaps
   // it enough to union cleanly).
-  const extStart = lead.start > 0 ? lead.start : rounded ? CELL_OVERLAP / 2 : STUD_PITCH / 2;
-  const extEnd = lead.end > 0 ? lead.end : rounded ? CELL_OVERLAP / 2 : STUD_PITCH / 2;
+  const extStart = lead.start > 0 ? lead.start : rounded ? CELL_OVERLAP / 2 : pitch / 2;
+  const extEnd = lead.end > 0 ? lead.end : rounded ? CELL_OVERLAP / 2 : pitch / 2;
 
-  const stadiumRadius = Math.min(STUD_PITCH / 2, beamWidth / 2);
+  const stadiumRadius = Math.min(pitch / 2, beamWidth / 2);
   const bodyFrom = firstHole - extStart + (stadiumStart ? stadiumRadius : 0);
   const bodyTo = lastHole + extEnd - (stadiumEnd ? stadiumRadius : 0);
   const bodyLength = bodyTo - bodyFrom;
@@ -172,7 +176,7 @@ export async function buildAngledBeamGeometry(
       const capAxis =
         suppressedHoles.has(end.hole) || joined ? "z" : beamHoleAxisAt(beam, end.hole);
       const capRadius =
-        capAxis === "z" ? Math.min(STUD_PITCH / 2, beamWidth / 2) : Math.min(STUD_PITCH / 2, halfHeight);
+        capAxis === "z" ? Math.min(pitch / 2, beamWidth / 2) : Math.min(pitch / 2, halfHeight);
       const capLength = capAxis === "z" ? beamHeight : beamWidth;
       const cap = new THREE.CylinderGeometry(capRadius, capRadius, capLength, 48);
       // THREE's cylinder runs along Y. A "z" cap stands upright; an in-plane cap already points
@@ -234,12 +238,12 @@ export async function buildAngledBeamGeometry(
       const boreAxis = vertical ? "z" : "y";
       const base =
         beam.holeType === "technicHole"
-          ? pinHoleGeometry(boreLength, boreAxis, clearance)
+          ? pinHoleGeometry(boreLength, boreAxis, clearance, connectorScale)
           : beam.holeType === "axleHole"
-            ? axleHoleGeometry(boreLength, boreAxis, clearance)
-            : studHoleGeometry(boreLength, boreAxis, clearance);
+            ? axleHoleGeometry(boreLength, boreAxis, clearance, connectorScale)
+            : studHoleGeometry(boreLength, boreAxis, clearance, connectorScale);
       const cutter = base.clone();
-      cutter.translate(firstHole + i * STUD_PITCH, 0, 0);
+      cutter.translate(firstHole + i * pitch, 0, 0);
       // Every bore is held back and cut from the finished assembly — the only place a cell that
       // would otherwise fill it can be reached. It stays the beam's own width either way, so this
       // clears the beam's hole and nothing beyond it.
@@ -260,8 +264,8 @@ export async function buildAngledBeamGeometry(
   }
 
   const angle = (beamAngleDegrees(beam) * Math.PI) / 180;
-  const ax = (beam.anchorX - (grid.width - 1) / 2) * STUD_PITCH;
-  const ay = (beam.anchorY - (grid.height - 1) / 2) * STUD_PITCH;
+  const ax = (beam.anchorX - (grid.width - 1) / 2) * pitch;
+  const ay = (beam.anchorY - (grid.height - 1) / 2) * pitch;
   solid.rotateZ(angle);
   solid.translate(ax, ay, layerBase + halfHeight);
   // A vertical bore is cut to the LAYER's height, so it's centred on the layer rather than on the
@@ -327,26 +331,30 @@ export async function buildBeamJoinBlend(
    * to work with on such a part and left every join as two rounded ends overlapping.
    */
   others: readonly { beam: AngledBeam; width: number }[] = [],
+  /** The beam's layer's own lattice pitch — see buildAngledBeamGeometry. */
+  pitch: number = STUD_PITCH,
+  /** The beam's layer's own connector scale, which sizes the hole mouths this blend keeps clear. */
+  connectorScale = 1,
 ): Promise<{ fill: THREE.BufferGeometry | null; carve: THREE.BufferGeometry | null }> {
   const layer = grid.layers[beam.layer];
   if (!layer || radius <= 0) return { fill: null, carve: null };
 
   const dir = beamDirection(beam);
   const perp = { x: -dir.y, y: dir.x };
-  const body = beamBodySpanStuds(beam);
-  const ax = (beam.anchorX - (grid.width - 1) / 2) * STUD_PITCH;
-  const ay = (beam.anchorY - (grid.height - 1) / 2) * STUD_PITCH;
+  const body = beamBodySpanStuds(beam, pitch);
+  const ax = (beam.anchorX - (grid.width - 1) / 2) * pitch;
+  const ay = (beam.anchorY - (grid.height - 1) / 2) * pitch;
   const at = (along: number, across: number): [number, number] => [
     ax + along * dir.x + across * perp.x,
     ay + along * dir.y + across * perp.y,
   ];
   /** Grid coords of a point given in the beam's own (along, across) frame, in mm. */
   const studAt = (along: number, acrossMm: number) => ({
-    x: beam.anchorX + (along * dir.x + acrossMm * perp.x) / STUD_PITCH,
-    y: beam.anchorY + (along * dir.y + acrossMm * perp.y) / STUD_PITCH,
+    x: beam.anchorX + (along * dir.x + acrossMm * perp.x) / pitch,
+    y: beam.anchorY + (along * dir.y + acrossMm * perp.y) / pitch,
   });
-  const from = body.from * STUD_PITCH;
-  const to = body.to * STUD_PITCH;
+  const from = body.from * pitch;
+  const to = body.to * pitch;
   const hw = beamWidth / 2;
   const across = beam.acrossOffset ?? 0;
   const beamPoly: [number, number][] = [
@@ -361,14 +369,14 @@ export async function buildBeamJoinBlend(
   // The cell size AS BUILT — see CELL_BUILT_HALF. The blend has to meet the walls the part will
   // really have: the nominal block body is 0.15mm inside them and the stud pitch 0.05mm inside,
   // and either mismatch leaves the fillet abutting a surface that isn't there.
-  const half = CELL_BUILT_HALF;
-  const reach = STUD_PITCH + 2 * radius + hw;
+  const half = cellBuiltHalf(pitch);
+  const reach = pitch + 2 * radius + hw;
   const cellPolys: [number, number][][] = [];
   for (let y = 0; y < grid.height; y++) {
     for (let x = 0; x < grid.width; x++) {
       if (layer[indexOf(grid, x, y)]?.type === CellType.Empty) continue;
-      const cx = (x - (grid.width - 1) / 2) * STUD_PITCH;
-      const cy = (y - (grid.height - 1) / 2) * STUD_PITCH;
+      const cx = (x - (grid.width - 1) / 2) * pitch;
+      const cy = (y - (grid.height - 1) / 2) * pitch;
       // Distance from the cell centre to the beam's own segment, so only the cells the beam
       // actually passes near are considered.
       const t = Math.max(from, Math.min(to, (cx - ax) * dir.x + (cy - ay) * dir.y));
@@ -376,7 +384,7 @@ export async function buildBeamJoinBlend(
       if (Math.hypot(cx - px, cy - py) > reach + half) continue;
       // A circle cell can have NO footprint at all — one swallowed by its ring's own bore — and an
       // empty outline is not a polygon the blend can use.
-      const poly = cellFootprint(grid, layer, x, y, cx, cy);
+      const poly = cellFootprint(grid, layer, x, y, cx, cy, pitch);
       if (poly.length >= 3) cellPolys.push(poly);
     }
   }
@@ -389,6 +397,7 @@ export async function buildBeamJoinBlend(
         other.beam,
         other.width,
         beamEndsMeetingBeams(other.beam, [beam, ...others.map((o) => o.beam)]),
+        pitch,
       ),
     );
   }
@@ -418,7 +427,7 @@ export async function buildBeamJoinBlend(
   if (beam.holeType !== "none") {
     const suppressed = new Set(beamSuppressedHoles(beam));
     const lead = beamLeadIn(beam);
-    const mouthRadius = PIN_HOLE_BOSS_RADIUS + grid.holeClearance + grid.sidewaysHoleClearance;
+    const mouthRadius = PIN_HOLE_BOSS_RADIUS * connectorScale + grid.holeClearance + grid.sidewaysHoleClearance;
     // Half the blend's reach, not all of it. The fillet's face curves away from the bore as it
     // goes, so past about half the standoff it is no longer in front of the mouth — clearing the
     // full depth only takes out material that was already out of the way.
@@ -426,9 +435,9 @@ export async function buildBeamJoinBlend(
     const angle = (beamAngleDegrees(beam) * Math.PI) / 180;
     for (let i = 0; i < beam.holes; i++) {
       if (suppressed.has(i) || beamHoleAxisAt(beam, i) === "z") continue;
-      const u = lead.start + i * STUD_PITCH;
+      const u = lead.start + i * pitch;
       for (const side of [1, -1]) {
-        const probe = studAt(u, across + side * (hw + STUD_PITCH / 4));
+        const probe = studAt(u, across + side * (hw + pitch / 4));
         const px = Math.round(probe.x);
         const py = Math.round(probe.y);
         if (inBounds(grid, px, py) && layer[indexOf(grid, px, py)]?.type !== CellType.Empty) continue;
@@ -472,8 +481,9 @@ function cellFootprint(
   y: number,
   cx: number,
   cy: number,
+  pitch: number = STUD_PITCH,
 ): [number, number][] {
-  const half = CELL_BUILT_HALF;
+  const half = cellBuiltHalf(pitch);
   const cell = layer[indexOf(grid, x, y)];
   const clear = (dx: number, dy: number) =>
     !inBounds(grid, x + dx, y + dy) ||
@@ -509,7 +519,7 @@ function cellFootprint(
       points.push([cx + Math.cos(a) * radius, cy + Math.sin(a) * radius]);
     }
   }
-  return clipToCircleRing(grid, cell, points);
+  return clipToCircleRing(grid, cell, points, pitch);
 }
 
 /** Longest segment (mm) left in an outline before it is clipped to a ring's arc. Short enough that
@@ -537,9 +547,11 @@ const RING_CLIP_STEP = 0.5;
  * geometry.ts short-circuits in the same way.
  */
 function clipToCircleRing(
+  // Threaded through from cellFootprint: the ring's radii are lattice measurements.
   grid: Pick<GridState, "width" | "height" | "circles">,
   cell: Cell | undefined,
   points: [number, number][],
+  pitch: number,
 ): [number, number][] {
   if (!cell || cell.type !== CellType.CircleSolid || !cell.circleId) return points;
   const ring = (grid.circles ?? []).find((c) => c.id === cell.circleId);
@@ -549,10 +561,10 @@ function clipToCircleRing(
   if (ring.outerSquare && !ring.hollow) return points;
 
   const { centreX, centreY } = ringCentreCell(ring);
-  const gx = (centreX - (grid.width - 1) / 2) * STUD_PITCH;
-  const gy = (centreY - (grid.height - 1) / 2) * STUD_PITCH;
-  const outerR = ring.outerSquare ? Infinity : (ring.dimension / 2) * STUD_PITCH;
-  const innerR = ring.hollow ? ((ring.dimension - 1) / 2) * STUD_PITCH : 0;
+  const gx = (centreX - (grid.width - 1) / 2) * pitch;
+  const gy = (centreY - (grid.height - 1) / 2) * pitch;
+  const outerR = ring.outerSquare ? Infinity : (ring.dimension / 2) * pitch;
+  const innerR = ring.hollow ? ((ring.dimension - 1) / 2) * pitch : 0;
 
   const dist = (p: [number, number]) => Math.hypot(p[0] - gx, p[1] - gy);
   const far = Math.max(...points.map(dist));
@@ -605,22 +617,23 @@ function beamOutline(
   beam: AngledBeam,
   width: number,
   joinedEnds: { start: boolean; end: boolean } = { start: false, end: false },
+  pitch: number = STUD_PITCH,
 ): [number, number][] {
   const dir = beamDirection(beam);
   const perp = { x: -dir.y, y: dir.x };
-  const body = beamBodySpanStuds(beam);
+  const body = beamBodySpanStuds(beam, pitch);
   const lead = beamLeadIn(beam);
   const rounded = beam.roundedEnds ?? true;
   const across = beam.acrossOffset ?? 0;
-  const ax = (beam.anchorX - (grid.width - 1) / 2) * STUD_PITCH;
-  const ay = (beam.anchorY - (grid.height - 1) / 2) * STUD_PITCH;
+  const ax = (beam.anchorX - (grid.width - 1) / 2) * pitch;
+  const ay = (beam.anchorY - (grid.height - 1) / 2) * pitch;
   const at = (along: number, over: number): [number, number] => [
     ax + along * dir.x + (over + across) * perp.x,
     ay + along * dir.y + (over + across) * perp.y,
   ];
   const hw = width / 2;
-  const from = body.from * STUD_PITCH;
-  const to = body.to * STUD_PITCH;
+  const from = body.from * pitch;
+  const to = body.to * pitch;
   // A cap is only there when that end has no lead-in — the same rule the builder uses, since a
   // lead-in carries the body past its end hole and a cap concentric with that hole is then wrong.
   // Round in PLAN only where the built cap is: a "z" cap is a vertical cylinder and shows as a
@@ -638,7 +651,7 @@ function beamOutline(
   // manufactures a fillet that isn't either.
   const stadiumStart = rounded && lead.start > 0 && !beamEndIsBuried(grid, beam, body.from);
   const stadiumEnd = rounded && lead.end > 0 && !beamEndIsBuried(grid, beam, body.to);
-  const capRadius = Math.min(STUD_PITCH / 2, hw);
+  const capRadius = Math.min(pitch / 2, hw);
 
   const points: [number, number][] = [];
   const arc = (centre: number, fromAngle: number, toAngle: number) => {

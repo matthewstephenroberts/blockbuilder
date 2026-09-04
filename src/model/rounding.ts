@@ -1,93 +1,29 @@
 import * as THREE from "three";
 import { HoleAxis } from "./cellTypes";
-import { intersect, subtract, union } from "./csg";
+import { intersect, union } from "./csg";
 import { STUD_PITCH } from "./units";
 
-export interface RoundingOptions {
-  /** Softens all 4 vertical corners of the footprint with a small fixed-radius fillet. */
-  corners: boolean;
-}
-
 /**
- * Per-corner radius cap, in mm — a corner whose cell has a hole/pin bore nearby gets a smaller
- * radius (just enough clearance to not breach that bore's wall) rather than being skipped
- * outright or cut at the full default radius regardless of what's underneath.
+ * Per-cell rounding — the only rounding this app does.
+ *
+ * There used to be a second, whole-PART pass here: a fixed 4mm fillet cut down the four vertical
+ * corners of the grid's bounding rectangle, exposed as a "Rounding / Round corners" checkbox. It
+ * was removed because on the one case it was built for — a plate filling its grid — it produced a
+ * result identical to simply marking the four corner cells rounded (both cut the same 4mm radius,
+ * since CELL_EDGE_RADIUS is half a cell), while on every other case it was wrong: it cut at the
+ * GRID's corners rather than the PART's, so it silently did nothing to a part smaller than its
+ * grid, rounded a bounding-box corner an L-shaped part has no material at, and on a mixed-pitch
+ * stack reached only the widest layer.
+ *
+ * Per-cell rounding has none of those failure modes — it follows the cells actually painted, works
+ * per layer, and rounds about each cell's own bore axis so a beam's D-shaped end comes out right,
+ * which a footprint-corner cut cannot express at all. It also needs no bore-safety clamp: the cap
+ * is concentric with the cell's own bore, so it can never cut into that bore's wall. The old pass
+ * needed a `CornerSafety` table precisely because its cut was near a bore without being centred on
+ * one.
  */
-export interface CornerSafety {
-  maxRadius: { sx: 1 | -1; sy: 1 | -1; radius: number }[];
-}
 
-export const CORNER_RADIUS = 4; // mm, ~ half a stud pitch — the usual Technic corner fillet size
 const OVERHANG = 2; // mm of cutter overhang past the body, so the cutter cleanly clears the surface it's trimming
-const MIN_CLEARANCE = 2;
-
-// NOTE: an earlier version of this module also offered "Round X/Y ends" — a full semicircular
-// beam-end cap. It was pulled after extensive debugging on the old three-bvh-csg-based pipeline
-// (isolated single-cut tests, fresh per-operation Evaluators, tangency-epsilon fixes, several
-// radius strategies, and a no-op control subtraction to rule out general body corruption) all
-// reproduced the same corrupted result on the old "soup" body (overlapping cell boxes/studs
-// concatenated without a true boolean union). Now that buildGridGeometry unions everything with
-// manifold-3d (guaranteed-manifold booleans), that whole failure mode should no longer apply —
-// but the end-cap feature itself hasn't been re-added/re-verified, so it stays out until it is.
-
-export async function applyRounding(
-  geom: THREE.BufferGeometry,
-  widthMm: number,
-  depthMm: number,
-  totalHeightMm: number,
-  opts: RoundingOptions,
-  cornerSafety?: CornerSafety,
-): Promise<THREE.BufferGeometry> {
-  let result = geom;
-  if (opts.corners) {
-    const defaultRadius = Math.min(CORNER_RADIUS, widthMm / 2 - MIN_CLEARANCE, depthMm / 2 - MIN_CLEARANCE);
-    result = await cutCorners(result, widthMm, depthMm, totalHeightMm, defaultRadius, cornerSafety);
-  }
-  return result;
-}
-
-/**
- * Rounds vertical corners of the footprint with a fixed-radius fillet — each corner capped to
- * whatever radius `cornerSafety` says is safe there (smaller, or the same default radius, but
- * never skipped outright). A corner whose cell has a hole/pin bore nearby needs a smaller
- * radius: cutting the full default radius there would remove the thin wall between the bore
- * and the newly-rounded outer surface, breaching straight through to open air instead of
- * leaving a proper closed hole.
- */
-async function cutCorners(
-  geom: THREE.BufferGeometry,
-  widthMm: number,
-  depthMm: number,
-  heightMm: number,
-  defaultRadius: number,
-  cornerSafety?: CornerSafety,
-): Promise<THREE.BufferGeometry> {
-  let result = geom;
-
-  for (const sx of [1, -1] as const) {
-    for (const sy of [1, -1] as const) {
-      const cap = cornerSafety?.maxRadius.find((c) => c.sx === sx && c.sy === sy)?.radius;
-      const radius = cap !== undefined ? Math.min(defaultRadius, cap) : defaultRadius;
-      if (radius <= 0) continue;
-
-      const cylGeom = new THREE.CylinderGeometry(radius, radius, heightMm + OVERHANG * 2, 48);
-      cylGeom.rotateX(Math.PI / 2);
-
-      const insetX = sx * (widthMm / 2 - radius);
-      const insetY = sy * (depthMm / 2 - radius);
-      const boxSize = radius + OVERHANG;
-
-      const boxGeom = new THREE.BoxGeometry(boxSize, boxSize, heightMm + OVERHANG * 2);
-      boxGeom.translate(insetX + (sx * boxSize) / 2, insetY + (sy * boxSize) / 2, heightMm / 2);
-
-      cylGeom.translate(insetX, insetY, heightMm / 2);
-
-      const wedge = await subtract(boxGeom, cylGeom);
-      result = await subtract(result, wedge);
-    }
-  }
-  return result;
-}
 
 // EXACTLY half the cell, so the cap is TANGENT to the cell's own flat faces and blends into them
 // smoothly, with no lip or ledge at the join.
@@ -104,10 +40,16 @@ async function cutCorners(
 // really is at STUD_PITCH / 2 and the tangent radius is exactly that.
 export const CELL_EDGE_RADIUS = STUD_PITCH / 2;
 
+/** CELL_EDGE_RADIUS at a given layer's own stud pitch — half a cell, whatever a cell measures. */
+export function cellEdgeRadius(pitch: number = STUD_PITCH): number {
+  return pitch / 2;
+}
+
 /** The cap radius a cell of this axis/height actually gets — see roundCellCorners' own clamping. */
-export function cellCapRadius(axis: HoleAxis, zHeight: number, radius = CELL_EDGE_RADIUS): number {
-  const vHalf = axis === "z" ? STUD_PITCH / 2 : zHeight / 2;
-  return Math.min(radius, STUD_PITCH / 2, vHalf);
+export function cellCapRadius(axis: HoleAxis, zHeight: number, radius?: number, pitch: number = STUD_PITCH): number {
+  const half = pitch / 2;
+  const vHalf = axis === "z" ? half : zHeight / 2;
+  return Math.min(radius ?? cellEdgeRadius(pitch), half, vHalf);
 }
 
 /**
@@ -129,9 +71,10 @@ export function cellCapCylinder(
   zBase: number,
   zHeight: number,
   lengthAlongAxis: number,
-  radius = CELL_EDGE_RADIUS,
+  pitch: number = STUD_PITCH,
+  radius?: number,
 ): THREE.BufferGeometry {
-  const r = cellCapRadius(axis, zHeight, radius);
+  const r = cellCapRadius(axis, zHeight, radius, pitch);
   const geom = new THREE.CylinderGeometry(r, r, lengthAlongAxis, 48);
   // THREE's CylinderGeometry runs along Y by default — already right for a "y" cap.
   if (axis === "z") geom.rotateX(Math.PI / 2);
@@ -176,8 +119,9 @@ export async function roundCellCorners(
   zBase: number,
   zHeight: number,
   corners: { s1: 1 | -1; s2: 1 | -1 }[],
-  radius = CELL_EDGE_RADIUS,
+  radius: number | undefined,
   extraKeep: THREE.BufferGeometry[] = [],
+  pitch: number = STUD_PITCH,
 ): Promise<THREE.BufferGeometry> {
   let result = geom;
   const zCenter = zBase + zHeight / 2;
@@ -186,9 +130,9 @@ export async function roundCellCorners(
   // uHalf/vHalf are the cross-section's half-extents; wLength is the cell's extent along the axis
   // (one stud for a sideways bore — every cell is exactly one stud wide/deep — or the cell's own
   // height for a vertical one).
-  const uHalf = STUD_PITCH / 2;
-  const vHalf = axis === "z" ? STUD_PITCH / 2 : zHeight / 2;
-  const wLength = axis === "z" ? zHeight : STUD_PITCH;
+  const uHalf = pitch / 2;
+  const vHalf = axis === "z" ? pitch / 2 : zHeight / 2;
+  const wLength = axis === "z" ? zHeight : pitch;
   const uCenter = axis === "x" ? cy : cx;
   const vCenter = axis === "z" ? cy : zCenter;
   const wCenter = axis === "z" ? zCenter : axis === "y" ? cy : cx;
@@ -198,7 +142,7 @@ export async function roundCellCorners(
   // EXACTLY, with nothing subtracted: landing exactly on it is the tangent case that makes the cap
   // meet the flat faces flush, and shaving even a twentieth of a millimetre off would put the lip
   // back (see CELL_EDGE_RADIUS).
-  const safeRadius = Math.min(radius, uHalf, vHalf);
+  const safeRadius = Math.min(radius ?? cellEdgeRadius(pitch), uHalf, vHalf);
   if (safeRadius <= 0) return result;
 
   // Maps this function's (u, v, w) onto real (x, y, z) — used for both a shape's LOCAL dimensions

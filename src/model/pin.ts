@@ -4,8 +4,10 @@ import { HoleAxis } from "./cellTypes";
 import { PIN_COLLAR_RADIUS, PIN_COLLAR_WIDTH, PIN_LIP_RADIUS, PIN_SHAFT_RADIUS, STUD_PITCH } from "./units";
 import { slitCutter } from "./flexSlit";
 
-export const PIN_MIN_LENGTH_STUDS = 0.5;
-export const PIN_DEFAULT_LENGTH_STUDS = 2;
+/** Floor on a pin's own length, in studs — a shorter one has no shaft left once its tip lips and
+ * flex splits are cut. Not exported: pins are built from PinPiece cells now (see geometry.ts's run
+ * consolidation), and a run's length comes from the cells it spans rather than from a picker. */
+const PIN_MIN_LENGTH_STUDS = 0.5;
 
 export interface PinOptions {
   /** Overall pin length in mm, running along its own axis. */
@@ -51,6 +53,13 @@ export interface PinOptions {
    * shorthand for the single-collar case when this is omitted) — not combined with them.
    */
   collars?: { offset: number; radius?: number }[];
+  /**
+   * Multiplies every dimension of the pin itself — shaft, collar, lip. 1 is the standard 8mm
+   * Technic pin; 1.25 is a native 10mm-system one (see grid.ts's LayerSpacing). Note that
+   * `length`, `collarOffset` and each `collars[].radius` are already absolute mm and are NOT
+   * scaled again here — the caller works those out from the cell it is growing the pin out of.
+   */
+  scale?: number;
 }
 
 // How far each end's flex split cuts in from its own tip, as a fraction of the pin's total
@@ -76,12 +85,14 @@ const END_SLIT_DEPTH_FRACTION = 0.32;
  * splits to compress into a slightly undersized hole.
  */
 export async function buildPinGeometry(opts: PinOptions): Promise<THREE.BufferGeometry> {
-  const length = Math.max(opts.length, STUD_PITCH * PIN_MIN_LENGTH_STUDS);
+  const scale = opts.scale ?? 1;
+  const shaftRadius = PIN_SHAFT_RADIUS * scale;
+  const length = Math.max(opts.length, STUD_PITCH * scale * PIN_MIN_LENGTH_STUDS);
   const axis = opts.axis ?? "z";
 
   // Built with the shaft's long axis along Y (three's cylinder default) — orientAlongAxis at
   // the end rotates the whole assembly onto whichever world axis was requested.
-  let geom: THREE.BufferGeometry = new THREE.CylinderGeometry(PIN_SHAFT_RADIUS, PIN_SHAFT_RADIUS, length, 40);
+  let geom: THREE.BufferGeometry = new THREE.CylinderGeometry(shaftRadius, shaftRadius, length, 40);
 
   // The mid-shaft collar(s). Built here in the shaft's own local frame (long axis along Y)
   // alongside the tip lips, so orientAlongAxis below carries them onto the target world axis with
@@ -89,8 +100,8 @@ export async function buildPinGeometry(opts: PinOptions): Promise<THREE.BufferGe
   // leave every collar — and the uncut spans holding the split halves together — intact.
   const collars = opts.collars ?? (opts.centerCollar ?? true ? [{ offset: opts.collarOffset ?? 0, radius: opts.collarRadius }] : []);
   for (const collar of collars) {
-    const collarRadius = collar.radius ?? PIN_COLLAR_RADIUS;
-    const collarGeom = new THREE.CylinderGeometry(collarRadius, collarRadius, PIN_COLLAR_WIDTH, 40);
+    const collarRadius = collar.radius ?? PIN_COLLAR_RADIUS * scale;
+    const collarGeom = new THREE.CylinderGeometry(collarRadius, collarRadius, PIN_COLLAR_WIDTH * scale, 40);
     collarGeom.translate(0, collar.offset, 0);
     geom = await union(geom, collarGeom);
   }
@@ -99,9 +110,9 @@ export async function buildPinGeometry(opts: PinOptions): Promise<THREE.BufferGe
   // surface, so the union only adds the outward-bulging half of it (radius PIN_SHAFT_RADIUS to
   // PIN_SHAFT_RADIUS + PIN_LIP_RADIUS*2), matching the reference's own lip profile.
   for (const end of [-1, 1]) {
-    const lipGeom = new THREE.TorusGeometry(PIN_SHAFT_RADIUS, PIN_LIP_RADIUS, 12, 32);
+    const lipGeom = new THREE.TorusGeometry(shaftRadius, PIN_LIP_RADIUS * scale, 12, 32);
     lipGeom.rotateX(Math.PI / 2);
-    lipGeom.translate(0, end * (length / 2 - PIN_LIP_RADIUS), 0);
+    lipGeom.translate(0, end * (length / 2 - PIN_LIP_RADIUS * scale), 0);
     geom = await union(geom, lipGeom);
   }
 
@@ -129,7 +140,7 @@ export async function buildPinGeometry(opts: PinOptions): Promise<THREE.BufferGe
   const endSlitLength = length * END_SLIT_DEPTH_FRACTION;
   for (const end of [-1, 1]) {
     const center = end * (length / 2 - endSlitLength / 2);
-    oriented = await subtract(oriented, slitCutter(axis, endSlitLength, PIN_SHAFT_RADIUS * 2, center));
+    oriented = await subtract(oriented, slitCutter(axis, endSlitLength, shaftRadius * 2, center));
   }
   return oriented;
 }

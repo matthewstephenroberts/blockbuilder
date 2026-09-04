@@ -21,7 +21,7 @@ import {
 } from "../model/angledBeam";
 import { STUD_PITCH } from "../model/units";
 import { fixedPlateHeight } from "../model/geometry";
-import { CELL_EDGE_RADIUS } from "../model/rounding";
+import { cellEdgeRadius } from "../model/rounding";
 import { createSlotDisc, DEFAULT_DISC_SETTINGS, normalizeSlotDisc, SlotDisc, SlotDiscSettings } from "../model/slotDisc";
 import { centreForOrigin, CircleRing } from "../model/circleRing";
 import {
@@ -44,7 +44,9 @@ import {
   resizeGrid,
   DEFAULT_RESIZE_ANCHOR,
   ResizeAnchor,
+  layerPitch,
   setActiveLayer,
+  setLayerSpacing,
   updateBeam,
   updateDisc,
   withActiveLayerCells,
@@ -162,7 +164,6 @@ export interface ProjectStore {
   removeCell: (x: number, y: number) => void;
   autoFill: (opts: AutoFillOptions) => void;
   resize: (width: number, height: number, anchor?: ResizeAnchor) => void;
-  setRoundingCorners: (value: boolean) => void;
   setPartClearance: (value: number) => void;
   setHoleClearance: (value: number) => void;
   setSidewaysHoleClearance: (value: number) => void;
@@ -171,6 +172,8 @@ export interface ProjectStore {
   duplicateLayer: (layerIndex: number) => void;
   removeLayer: (layerIndex: number) => void;
   setActiveLayer: (layerIndex: number) => void;
+  /** Changes one layer's stud pitch and/or which system's connectors it carries — see LayerSpacing. */
+  setLayerSpacing: (layerIndex: number, patch: { pitch?: number; connectorPitch?: number }) => void;
   moveLayerUp: (layerIndex: number) => void;
   moveLayerDown: (layerIndex: number) => void;
   /** Layer indices currently hidden from the 3D preview — a pure viewing convenience (see
@@ -549,19 +552,20 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
           // silently at placement is the surprising choice. The flush is still one click away in
           // the beam panel for the times the wall matters more; the panel says what it costs.
           if (fit && !verticalBores) {
-            const width = Math.min(STUD_PITCH, fixedPlateHeight(beam.widthFraction) ?? STUD_PITCH);
+            const bp = layerPitch(prev, beam.layer);
+            const width = Math.min(bp, fixedPlateHeight(beam.widthFraction, bp) ?? bp);
             const roundedHere = (x: number, y: number) =>
               !!layerCells && inBounds(prev, x, y) && layerCells[indexOf(prev, x, y)]?.rounded
-                ? CELL_EDGE_RADIUS
+                ? cellEdgeRadius(bp)
                 : 0;
             const neighbours = layerBeams
               .filter((b) => b.layer === prev.activeLayer)
               .map((b) => ({
                 beam: b,
-                width: Math.min(STUD_PITCH, fixedPlateHeight(b.widthFraction) ?? STUD_PITCH),
+                width: Math.min(bp, fixedPlateHeight(b.widthFraction, bp) ?? bp),
               }));
             beam.acrossOffset =
-              beamFlushOffset(beam, solidHere, width, roundedHere, neighbours) || undefined;
+              beamFlushOffset(beam, solidHere, width, roundedHere, neighbours, bp) || undefined;
           }
           pushHistory(prev);
           setSelectedBeamId(beam.id);
@@ -1350,10 +1354,6 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
     });
   }, []);
 
-  const setRoundingCorners = useCallback((value: boolean) => {
-    setGridState((prev) => ({ ...prev, rounding: { ...prev.rounding, corners: value } }));
-  }, []);
-
   const setPartClearance = useCallback((value: number) => {
     setGridState((prev) => ({ ...prev, partClearance: Math.max(0, value) }));
   }, []);
@@ -1469,16 +1469,17 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       const isSolid = (x: number, y: number) =>
         inBounds(prev, x, y) && layer[indexOf(prev, x, y)]?.type !== CellType.Empty;
       // A rounded cell has an arc where its corner would be — see beamFlushOffset's own note.
+      const bp = layerPitch(prev, beam.layer);
       const roundRadiusAt = (x: number, y: number) =>
-        inBounds(prev, x, y) && layer[indexOf(prev, x, y)]?.rounded ? CELL_EDGE_RADIUS : 0;
-      const width = Math.min(STUD_PITCH, fixedPlateHeight(beam.widthFraction) ?? STUD_PITCH);
+        inBounds(prev, x, y) && layer[indexOf(prev, x, y)]?.rounded ? cellEdgeRadius(bp) : 0;
+      const width = Math.min(bp, fixedPlateHeight(beam.widthFraction, bp) ?? bp);
       const others = (prev.beams ?? [])
         .filter((b) => b.id !== beam.id && b.layer === beam.layer)
         .map((b) => ({
           beam: b,
-          width: Math.min(STUD_PITCH, fixedPlateHeight(b.widthFraction) ?? STUD_PITCH),
+          width: Math.min(bp, fixedPlateHeight(b.widthFraction, bp) ?? bp),
         }));
-      const offset = beamFlushOffset(beam, isSolid, width, roundRadiusAt, others);
+      const offset = beamFlushOffset(beam, isSolid, width, roundRadiusAt, others, bp);
       if (offset === null) return prev;
       applied = offset;
       const next = updateBeam(prev, id, { acrossOffset: offset || undefined });
@@ -1620,6 +1621,18 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
     setGridState((prev) => setActiveLayer(prev, layerIndex));
   }, []);
 
+  const setLayerSpacingAction = useCallback(
+    (layerIndex: number, patch: { pitch?: number; connectorPitch?: number }) => {
+      setGridState((prev) => {
+        const next = setLayerSpacing(prev, layerIndex, patch);
+        if (next === prev) return prev;
+        pushHistory(prev);
+        return next;
+      });
+    },
+    [],
+  );
+
   const moveLayerUpAction = useCallback(
     (layerIndex: number) => {
       setGridState((prev) => {
@@ -1731,7 +1744,6 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       removeCell: removeCellAction,
       autoFill,
       resize,
-      setRoundingCorners,
       setPartClearance,
       setHoleClearance,
       setSidewaysHoleClearance,
@@ -1739,6 +1751,7 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       duplicateLayer: duplicateLayerAction,
       removeLayer: removeLayerAction,
       setActiveLayer: setActiveLayerAction,
+      setLayerSpacing: setLayerSpacingAction,
       moveLayerUp: moveLayerUpAction,
       moveLayerDown: moveLayerDownAction,
       hiddenLayers,
@@ -1824,13 +1837,13 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       removeCellAction,
       autoFill,
       resize,
-      setRoundingCorners,
       setPartClearance,
       setHoleClearance,
       addLayerAction,
       duplicateLayerAction,
       removeLayerAction,
       setActiveLayerAction,
+      setLayerSpacingAction,
       moveLayerUpAction,
       moveLayerDownAction,
       hiddenLayers,

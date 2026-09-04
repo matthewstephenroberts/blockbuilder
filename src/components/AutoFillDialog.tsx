@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { AutoFillBorderType, AutoFillOptions } from "../model/autofill";
-import { CELL_TYPE_INFO, CellType, PLATE_FRACTION_INFO, PLATE_FRACTION_ORDER, PlateFraction } from "../model/cellTypes";
+import { CELL_TYPE_INFO, CellType, plateFractionLabel, PLATE_FRACTION_ORDER, PlateFraction } from "../model/cellTypes";
 
 interface Props {
   defaultWidth: number;
   defaultHeight: number;
+  /** The active layer's stud pitch — the plate-height options are quoted at it, since a "module"
+   * is that pitch and the generated layer is built on it. */
+  pitch: number;
   onGenerate: (opts: AutoFillOptions) => void;
 }
 
@@ -16,13 +19,17 @@ const BORDER_OPTIONS: AutoFillBorderType[] = [
   CellType.Solid,
 ];
 
-export default function AutoFillDialog({ defaultWidth, defaultHeight, onGenerate }: Props) {
+export default function AutoFillDialog({ defaultWidth, defaultHeight, pitch, onGenerate }: Props) {
   const [width, setWidth] = useState(defaultWidth);
   const [height, setHeight] = useState(defaultHeight);
   const [border, setBorder] = useState(1);
-  const [interiorPlateFraction, setInteriorPlateFraction] = useState<PlateFraction>("full");
+  // One module tall, not a System brick's 9.6mm ("full"). A module follows the layer's own stud
+  // pitch (8mm or 10mm — see grid.ts's LayerSpacing), so an auto-filled plate comes out at full
+  // BEAM height for whichever system that layer is on, and stacks flush with the beams and holes
+  // around it. "Full" is still in the picker for when a 9.6mm brick is genuinely what's wanted.
+  const [interiorPlateFraction, setInteriorPlateFraction] = useState<PlateFraction>("module");
   const [interiorRounded, setInteriorRounded] = useState(false);
-  const [borderPlateFraction, setBorderPlateFraction] = useState<PlateFraction>("full");
+  const [borderPlateFraction, setBorderPlateFraction] = useState<PlateFraction>("module");
   const [borderType, setBorderType] = useState<AutoFillBorderType>(CellType.TechnicHole);
   const [borderPattern, setBorderPattern] = useState<"edge" | "alternating">("edge");
   const [borderRounded, setBorderRounded] = useState(false);
@@ -58,7 +65,7 @@ export default function AutoFillDialog({ defaultWidth, defaultHeight, onGenerate
         >
           {PLATE_FRACTION_ORDER.map((f) => (
             <option key={f} value={f}>
-              {PLATE_FRACTION_INFO[f].label}
+              {plateFractionLabel(f, pitch)}
             </option>
           ))}
         </select>
@@ -95,7 +102,7 @@ export default function AutoFillDialog({ defaultWidth, defaultHeight, onGenerate
             >
               {PLATE_FRACTION_ORDER.map((f) => (
                 <option key={f} value={f}>
-                  {PLATE_FRACTION_INFO[f].label}
+                  {plateFractionLabel(f, pitch)}
                 </option>
               ))}
             </select>

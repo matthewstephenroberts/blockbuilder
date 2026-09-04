@@ -8,6 +8,12 @@ export interface BallPinOptions {
   neckLength: number;
   /** World axis the pin points along once built (default "z"). */
   axis?: HoleAxis;
+  /**
+   * Multiplies the neck and ball radii — 1 for the standard 8mm Technic ball joint, 1.25 for a
+   * native 10mm-system one (see grid.ts's LayerSpacing). `neckLength` is already absolute mm and
+   * is not scaled again here.
+   */
+  scale?: number;
 }
 
 /**
@@ -24,15 +30,17 @@ export interface BallPinOptions {
 export async function buildBallPinGeometry(opts: BallPinOptions): Promise<THREE.BufferGeometry> {
   const axis = opts.axis ?? "z";
   const neckLength = Math.max(opts.neckLength, 1);
+  const scale = opts.scale ?? 1;
 
   // Built base-anchored at the local origin, growing along +Y: neck from y=0 to y=neckLength,
   // ball centred at y=neckLength. The neck and ball genuinely overlap where they meet, so they're
   // joined with a real CSG union (guaranteed manifold) rather than a plain, non-boolean merge —
   // a plain merge would leave the neck's own end cap as a stray internal face inside the sphere's
   // volume instead of a single clean outer surface.
-  const neckGeom = new THREE.CylinderGeometry(BALL_PIN_NECK_RADIUS, BALL_PIN_NECK_RADIUS, neckLength, 40);
+  const neckRadius = BALL_PIN_NECK_RADIUS * scale;
+  const neckGeom = new THREE.CylinderGeometry(neckRadius, neckRadius, neckLength, 40);
   neckGeom.translate(0, neckLength / 2, 0);
-  const ballGeom = new THREE.SphereGeometry(BALL_JOINT_RADIUS, 40, 24);
+  const ballGeom = new THREE.SphereGeometry(BALL_JOINT_RADIUS * scale, 40, 24);
   ballGeom.translate(0, neckLength, 0);
   const geom = await union(neckGeom, ballGeom);
 

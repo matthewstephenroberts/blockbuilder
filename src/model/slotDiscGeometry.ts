@@ -6,12 +6,13 @@ import {
   effectiveChamferMm,
   isSlotOpen,
   outerRadiusMm,
+  floorThicknessMm,
   pocketDepthMm,
   ringRadiusMm,
   SlotDisc,
   slotSizeMm,
 } from "./slotDisc";
-import { PLATE_HEIGHT, STUD_PITCH } from "./units";
+import { STUD_PITCH } from "./units";
 
 const CUT_EPSILON = 0.05;
 const DISC_SEGMENTS = 128;
@@ -54,12 +55,16 @@ export function buildSlotDiscGeometry(
   layerBase: number,
   discHeight: number,
   layerHeight: number,
+  /** The disc's layer's own lattice pitch — its position, ring radius and pocket sizes follow it. */
+  pitch: number = STUD_PITCH,
+  /** The disc's layer's own connector scale — only its centre BORE follows this, not its lattice. */
+  connectorScale = 1,
 ): { body: THREE.BufferGeometry; throughCutters: THREE.BufferGeometry[]; bodyCutters: THREE.BufferGeometry[] } {
-  const cx = (disc.centreX - (grid.width - 1) / 2) * STUD_PITCH;
-  const cy = (disc.centreY - (grid.height - 1) / 2) * STUD_PITCH;
+  const cx = (disc.centreX - (grid.width - 1) / 2) * pitch;
+  const cy = (disc.centreY - (grid.height - 1) / 2) * pitch;
   // partClearance pulls the disc's rim in — see outerRadiusMm. Only the OUTER skin: the pockets and
   // the bore keep their own fitted sizes, exactly as a cell's holes do.
-  const outerR = outerRadiusMm(disc, grid.partClearance);
+  const outerR = outerRadiusMm(disc, grid.partClearance, pitch);
 
   // A square disc keeps the SAME half-width, so every pocket sits exactly where it does on the
   // round one and only the waste corners are filled in — that's the point of it: a round rim inside
@@ -91,16 +96,16 @@ export function buildSlotDiscGeometry(
     const boreClearance = grid.holeClearance ?? 0;
     const bore = (
       disc.bore === "axleHole"
-        ? axleHoleGeometry(boreLength, "z", boreClearance)
-        : pinHoleGeometry(boreLength, "z", boreClearance)
+        ? axleHoleGeometry(boreLength, "z", boreClearance, connectorScale)
+        : pinHoleGeometry(boreLength, "z", boreClearance, connectorScale)
     ).clone();
     bore.translate(cx, cy, boreZ);
     throughCutters.push(bore);
   }
 
-  const size = slotSizeMm(disc);
-  const ringR = ringRadiusMm(disc);
-  const floor = Math.max(0, disc.floorPlates) * PLATE_HEIGHT;
+  const size = slotSizeMm(disc, pitch);
+  const ringR = ringRadiusMm(disc, pitch);
+  const floor = floorThicknessMm(disc, pitch);
   // A through pocket spans the whole layer (so nothing above or below can plug it); a floored one
   // starts at its floor and still runs out through the top, which is the face a block loads from.
   const cutBottom = floor > 0 ? layerBase + floor : layerBase - CUT_EPSILON;
@@ -116,7 +121,7 @@ export function buildSlotDiscGeometry(
   // depend on that choice — see effectiveChamferMm.
   // Measured against the DISC's own material, not the cutter's span — see pocketDepthMm.
   const sides = chamferedSides(disc);
-  const chamfer = effectiveChamferMm(disc, pocketDepthMm(disc, discHeight));
+  const chamfer = effectiveChamferMm(disc, pocketDepthMm(disc, discHeight, pitch));
   // The mouths sit at the disc's own faces, not at the cutter's ends — the cutter deliberately
   // overshoots past both (see cutBottom/cutTop) so it always breaks out, and a chamfer placed at
   // the overshoot would be cut off in mid-air outside the material.

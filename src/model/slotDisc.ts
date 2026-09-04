@@ -110,8 +110,8 @@ export const MIN_DISC_RIM = 2;
 
 /** A pocket's true size in mm: the block's own BODY size (not its stud pitch — see
  * blockBodySizeMm) plus the clearance. */
-export function slotSizeMm(disc: SlotDisc): number {
-  return blockBodySizeMm(disc.slotStuds) + disc.slotClearance;
+export function slotSizeMm(disc: SlotDisc, pitch: number = STUD_PITCH): number {
+  return blockBodySizeMm(disc.slotStuds, pitch) + disc.slotClearance;
 }
 
 /**
@@ -146,8 +146,15 @@ export const MAX_CHAMFER_FRACTION = 0.4;
  * the 6.4mm and met in the middle — a funnel, not a pocket. It also disagreed with the panel, which
  * was already measuring against the disc's thickness.
  */
-export function pocketDepthMm(disc: SlotDisc, discThicknessMm: number): number {
-  return Math.max(0, discThicknessMm - Math.max(0, disc.floorPlates) * PLATE_HEIGHT);
+/** A pocket floor's thickness in mm — `floorPlates` plates, at the layer's own scale. A plate is
+ * 3.2mm on the 8mm system and scales with the pitch like every other height (see
+ * geometry.ts's fixedPlateHeight), so a floor keeps the same proportion of a 10mm disc. */
+export function floorThicknessMm(disc: SlotDisc, pitch: number = STUD_PITCH): number {
+  return Math.max(0, disc.floorPlates) * PLATE_HEIGHT * (pitch / STUD_PITCH);
+}
+
+export function pocketDepthMm(disc: SlotDisc, discThicknessMm: number, pitch: number = STUD_PITCH): number {
+  return Math.max(0, discThicknessMm - floorThicknessMm(disc, pitch));
 }
 
 export function effectiveChamferMm(disc: SlotDisc, cutDepthMm: number): number {
@@ -205,10 +212,10 @@ export function slotGapPerSideMm(disc: SlotDisc): number {
  * Distance from the corner to the bisector between the two pockets, doubled (each pocket eats into
  * the wall from its own side).
  */
-export function slotWallMm(disc: SlotDisc): number {
-  const size = slotSizeMm(disc);
+export function slotWallMm(disc: SlotDisc, pitch: number = STUD_PITCH): number {
+  const size = slotSizeMm(disc, pitch);
   const n = Math.max(2, disc.slots);
-  const innerRadius = ringRadiusMm(disc) - size / 2;
+  const innerRadius = ringRadiusMm(disc, pitch) - size / 2;
   if (innerRadius <= 0) return -Infinity;
   const corner = Math.hypot(innerRadius, size / 2);
   const cornerAngle = Math.atan2(size / 2, innerRadius);
@@ -223,11 +230,11 @@ export function slotWallMm(disc: SlotDisc): number {
  * wedge they sit in widens), so a bisection finds the smallest radius that clears it — there's no
  * closed form once the measurement is taken at the corner rather than the centre.
  */
-export function autoRingRadiusStuds(disc: SlotDisc): number {
-  const size = slotSizeMm(disc);
+export function autoRingRadiusStuds(disc: SlotDisc, pitch: number = STUD_PITCH): number {
+  const size = slotSizeMm(disc, pitch);
   let lo = size / 2 + 0.01;
   let hi = Math.max(lo * 2, size * Math.max(2, disc.slots));
-  const wallAt = (radiusMm: number) => slotWallMm({ ...disc, ringRadiusStuds: radiusMm / STUD_PITCH });
+  const wallAt = (radiusMm: number) => slotWallMm({ ...disc, ringRadiusStuds: radiusMm / pitch }, pitch);
   // Guard against a slot count so high that even `hi` is too tight to fit them.
   for (let i = 0; i < 40 && wallAt(hi) < MIN_SLOT_WALL; i++) hi *= 1.5;
   for (let i = 0; i < 60; i++) {
@@ -235,11 +242,11 @@ export function autoRingRadiusStuds(disc: SlotDisc): number {
     if (wallAt(mid) < MIN_SLOT_WALL) lo = mid;
     else hi = mid;
   }
-  return hi / STUD_PITCH;
+  return hi / pitch;
 }
 
-export function ringRadiusMm(disc: SlotDisc): number {
-  return (disc.ringRadiusStuds ?? autoRingRadiusStuds(disc)) * STUD_PITCH;
+export function ringRadiusMm(disc: SlotDisc, pitch: number = STUD_PITCH): number {
+  return (disc.ringRadiusStuds ?? autoRingRadiusStuds(disc, pitch)) * pitch;
 }
 
 /**
@@ -255,25 +262,25 @@ export function ringRadiusMm(disc: SlotDisc): number {
  * overlaps one by a fraction of a stud instead of butting up against the next boundary. Snapping
  * OUT (never in) keeps every pocket where it was and only adds waste corner material.
  */
-function snapToCellBoundary(radius: number): number {
-  const halfPitch = STUD_PITCH / 2;
+function snapToCellBoundary(radius: number, pitch: number = STUD_PITCH): number {
+  const halfPitch = pitch / 2;
   if (radius <= halfPitch) return halfPitch;
-  return halfPitch + STUD_PITCH * Math.ceil((radius - halfPitch) / STUD_PITCH);
+  return halfPitch + pitch * Math.ceil((radius - halfPitch) / pitch);
 }
 
 /** The radius the ring geometry actually needs, before a square disc snaps out to the grid. */
-export function unsnappedOuterRadiusMm(disc: SlotDisc, partClearance = 0): number {
-  const half = slotSizeMm(disc) / 2;
-  return Math.hypot(ringRadiusMm(disc) + half, half) + disc.rimMm - partClearance;
+export function unsnappedOuterRadiusMm(disc: SlotDisc, partClearance = 0, pitch: number = STUD_PITCH): number {
+  const half = slotSizeMm(disc, pitch) / 2;
+  return Math.hypot(ringRadiusMm(disc, pitch) + half, half) + disc.rimMm - partClearance;
 }
 
-export function outerRadiusMm(disc: SlotDisc, partClearance = 0): number {
-  const half = slotSizeMm(disc) / 2;
-  const cornerRadius = Math.hypot(ringRadiusMm(disc) + half, half);
+export function outerRadiusMm(disc: SlotDisc, partClearance = 0, pitch: number = STUD_PITCH): number {
+  const half = slotSizeMm(disc, pitch) / 2;
+  const cornerRadius = Math.hypot(ringRadiusMm(disc, pitch) + half, half);
   if (disc.outerShape === "square") {
     // Snapped BEFORE the clearance comes off, so the clearance still opens a real running gap
     // against the neighbour rather than being swallowed by the snap.
-    return snapToCellBoundary(cornerRadius + disc.rimMm) - partClearance;
+    return snapToCellBoundary(cornerRadius + disc.rimMm, pitch) - partClearance;
   }
   // partClearance pulls the rim in, the same inward offset it applies to a cell's outer skin —
   // this is a part meant to TURN inside something else, so it's exactly the case that setting is
@@ -307,12 +314,12 @@ export function outerRadiusMm(disc: SlotDisc, partClearance = 0): number {
  *
  * Inverts outerRadiusMm: outer = hypot(ring + half, half) + rim - partClearance.
  */
-export function ringRadiusForRim(disc: SlotDisc, targetRimMm: number, partClearance = 0): number {
-  const half = slotSizeMm(disc) / 2;
-  const outer = outerRadiusMm(disc, partClearance);
+export function ringRadiusForRim(disc: SlotDisc, targetRimMm: number, partClearance = 0, pitch: number = STUD_PITCH): number {
+  const half = slotSizeMm(disc, pitch) / 2;
+  const outer = outerRadiusMm(disc, partClearance, pitch);
   const cornerRadius = outer + partClearance - targetRimMm;
-  if (cornerRadius <= half) return disc.ringRadiusStuds ?? autoRingRadiusStuds(disc);
-  return (Math.sqrt(cornerRadius * cornerRadius - half * half) - half) / STUD_PITCH;
+  if (cornerRadius <= half) return disc.ringRadiusStuds ?? autoRingRadiusStuds(disc, pitch);
+  return (Math.sqrt(cornerRadius * cornerRadius - half * half) - half) / pitch;
 }
 
 /** A running gap (mm, per side) between a disc and the bore it turns in — enough to spin freely
@@ -326,10 +333,10 @@ export const DISC_RUNNING_GAP = 0.4;
  * growing the rim to close the gap is the adjustment that makes them one, and it adds material
  * where the disc wants it anyway.
  */
-export function rimForRingFit(disc: SlotDisc, dimension: number, partClearance = 0): number {
-  const innerRadius = ((dimension - 1) / 2) * STUD_PITCH;
-  const half = slotSizeMm(disc) / 2;
-  const cornerRadius = Math.hypot(ringRadiusMm(disc) + half, half);
+export function rimForRingFit(disc: SlotDisc, dimension: number, partClearance = 0, pitch: number = STUD_PITCH): number {
+  const innerRadius = ((dimension - 1) / 2) * pitch;
+  const half = slotSizeMm(disc, pitch) / 2;
+  const cornerRadius = Math.hypot(ringRadiusMm(disc, pitch) + half, half);
   // outerRadiusMm = cornerRadius + rim - partClearance, and we want that to be
   // innerRadius - DISC_RUNNING_GAP.
   return Math.max(0, innerRadius - DISC_RUNNING_GAP - cornerRadius + partClearance);
@@ -338,18 +345,19 @@ export function rimForRingFit(disc: SlotDisc, dimension: number, partClearance =
 export function fittingHollowRing(
   disc: SlotDisc,
   partClearance = 0,
+  pitch: number = STUD_PITCH,
 ): { dimension: number; innerDiameterMm: number; slackMm: number } {
-  const outer = outerRadiusMm(disc, partClearance);
+  const outer = outerRadiusMm(disc, partClearance, pitch);
   // Ring bore radius for dimension d is (d - 1) / 2 studs; solve for the smallest d that clears.
-  const smallest = Math.ceil((2 * outer) / STUD_PITCH + 1);
+  const smallest = Math.ceil((2 * outer) / pitch + 1);
   const dimension = Math.max(3, smallest % 2 === 0 ? smallest + 1 : smallest);
-  const innerRadius = ((dimension - 1) / 2) * STUD_PITCH;
+  const innerRadius = ((dimension - 1) / 2) * pitch;
   return { dimension, innerDiameterMm: innerRadius * 2, slackMm: innerRadius - outer };
 }
 
 /** Material (mm) left between the centre bore and the inner face of a pocket. */
-export function hubWallMm(disc: SlotDisc, boreRadiusMm: number): number {
-  return ringRadiusMm(disc) - slotSizeMm(disc) / 2 - boreRadiusMm;
+export function hubWallMm(disc: SlotDisc, boreRadiusMm: number, pitch: number = STUD_PITCH): number {
+  return ringRadiusMm(disc, pitch) - slotSizeMm(disc, pitch) / 2 - boreRadiusMm;
 }
 
 /**

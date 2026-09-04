@@ -55,7 +55,9 @@ export async function generateBrushPreview(type: CellType, width: number = 60, h
         type,
         axis: "x",
         flip: false,
-        plateFraction: "full",
+        // Matches the brush picker's own default (see useProjectStore) — a preview built at a
+        // different height than the cell the click actually paints is a preview of the wrong thing.
+        plateFraction: "module",
         widthFraction: undefined,
         rounded: false,
       };

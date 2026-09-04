@@ -9,6 +9,7 @@ import {
   ringFootprint,
 } from "./circleRing";
 import { SlotDisc } from "./slotDisc";
+import { DEFAULT_STUD_PITCH, normalizeStudPitch } from "./units";
 import { AXIS_SETTABLE_TYPES, BLEND_AWARE_TYPES, CellType, FLIP_AWARE_TYPES, HoleAxis, PlateFraction } from "./cellTypes";
 
 export interface Cell {
@@ -105,15 +106,9 @@ let copySeq = 0;
  */
 export type Layer = Cell[]; // row-major, length width*height
 
-/** Outer-silhouette rounding, applied to the whole assembled part (see model/rounding.ts). */
-export interface RoundingConfig {
-  corners: boolean;
-}
-
 export interface GridState {
   width: number;
   height: number;
-  rounding: RoundingConfig;
   /**
    * A uniform inward offset (mm) applied to the whole assembled part's true outer skin — the
    * footprint's perimeter walls and its very top/bottom faces — leaving every internal joint
@@ -157,6 +152,19 @@ export interface GridState {
    */
   sidewaysHoleClearance: number;
   layers: Layer[];
+  /**
+   * Each layer's own spacing (see LayerSpacing), parallel to `layers`.
+   *
+   * Optional, and read through `layerPitch()`/`layerConnectorPitch()` rather than directly: a
+   * project saved before this existed has no array at all, and a hand-edited one may have an array
+   * shorter than its layer list. Either way a missing entry means the default.
+   *
+   * Kept parallel by every layer operation in this file (add/duplicate/remove/move). A per-layer
+   * record hanging off `Layer` would be self-maintaining, but `Layer` is a bare `Cell[]` that
+   * geometry, the editor and the file format all index directly, so widening it would touch far
+   * more than the four functions that reorder layers.
+   */
+  layerSpacing?: LayerSpacing[];
   activeLayer: number;
   /**
    * Beams running at an angle across the X/Y plane, alongside the cell grid rather than inside it
@@ -185,6 +193,93 @@ export function inBounds(grid: Pick<GridState, "width" | "height">, x: number, y
   return x >= 0 && x < grid.width && y >= 0 && y < grid.height;
 }
 
+/**
+ * One layer's spacing: the lattice pitch it is laid out on, and which system's CONNECTORS it
+ * carries.
+ *
+ * Two numbers rather than one because a metric 10mm set is not just the 8mm
+ * lattice spread out — per the vendor's own catalogue it is the whole ecosystem scaled by 10/8,
+ * pins and axles included, so a native 10mm beam takes a thicker pin than a Technic one. A single
+ * "pitch" knob would therefore be ambiguous: it can't say whether a 10mm-spaced layer wants 10mm
+ * pins (a native 10mm part) or 8mm ones (an 8mm pin reaching across a widened lattice).
+ *
+ * Splitting them is what actually makes the ADAPTER this feature exists for buildable. The obvious
+ * adapter is two layers — an 8mm one and a 10mm one — fused into one printed part. But the more
+ * useful one is a SINGLE layer at `pitch: 10, connectorPitch: 8`: a beam whose holes sit on the
+ * 10mm grid so it bolts to a 10mm frame, while still taking the 8mm pins you already own.
+ */
+export interface LayerSpacing {
+  /** Cell-to-cell spacing in mm, and with it cell size and Technic module height. 8 or 10. */
+  pitch: number;
+  /**
+   * The system whose CONNECTOR dimensions this layer's holes and pins are built at, expressed as
+   * that system's own pitch — every connector dimension in units.ts is scaled by
+   * `connectorPitch / DEFAULT_STUD_PITCH`. Omitted means "match `pitch`", which is the right
+   * default: a native part's pins scale with its lattice.
+   */
+  connectorPitch?: number;
+}
+
+/** Layer `layerIndex`'s spacing, fully defaulted. */
+export function layerSpacingOf(grid: Pick<GridState, "layerSpacing">, layerIndex: number): Required<LayerSpacing> {
+  const raw = grid.layerSpacing?.[layerIndex];
+  const pitch = normalizeStudPitch(raw?.pitch);
+  return { pitch, connectorPitch: raw?.connectorPitch === undefined ? pitch : normalizeStudPitch(raw.connectorPitch) };
+}
+
+/** The lattice pitch layer `layerIndex` is built at, in mm. */
+export function layerPitch(grid: Pick<GridState, "layerSpacing">, layerIndex: number): number {
+  return layerSpacingOf(grid, layerIndex).pitch;
+}
+
+/** The pitch whose connector dimensions layer `layerIndex`'s holes and pins are sized to, in mm. */
+export function layerConnectorPitch(grid: Pick<GridState, "layerSpacing">, layerIndex: number): number {
+  return layerSpacingOf(grid, layerIndex).connectorPitch;
+}
+
+/**
+ * The factor every connector dimension on layer `layerIndex` is multiplied by — 1 for the 8mm
+ * 8mm system, 1.25 for a native 10mm one. See LayerSpacing.connectorPitch.
+ */
+export function layerConnectorScale(grid: Pick<GridState, "layerSpacing">, layerIndex: number): number {
+  return layerConnectorPitch(grid, layerIndex) / DEFAULT_STUD_PITCH;
+}
+
+/** Every layer's spacing, densely, one entry per layer — for callers that walk the whole stack. */
+export function allLayerSpacing(grid: Pick<GridState, "layers" | "layerSpacing">): Required<LayerSpacing>[] {
+  return grid.layers.map((_, i) => layerSpacingOf(grid, i));
+}
+
+/** The largest lattice pitch in use, which is what the assembled part's outer footprint is set by. */
+export function maxLayerPitch(grid: Pick<GridState, "layers" | "layerSpacing">): number {
+  return allLayerSpacing(grid).reduce((a, s) => Math.max(a, s.pitch), DEFAULT_STUD_PITCH);
+}
+
+/**
+ * Changes one layer's spacing, materialising the (optional, possibly short) array to full length.
+ * `connectorPitch` is dropped whenever it would equal the pitch, so the common case stays stored as
+ * "matches its lattice" and keeps following the pitch if that is changed again later.
+ */
+export function setLayerSpacing(grid: GridState, layerIndex: number, patch: Partial<LayerSpacing>): GridState {
+  if (layerIndex < 0 || layerIndex >= grid.layers.length) return grid;
+  const next = allLayerSpacing(grid);
+  const current = next[layerIndex];
+  const pitch = normalizeStudPitch(patch.pitch ?? current.pitch);
+  const connectorPitch =
+    patch.connectorPitch === undefined
+      ? // Changing only the pitch carries a MATCHED connector size along with it, and leaves a
+        // deliberately mismatched one (the adapter case) alone.
+        current.connectorPitch === current.pitch
+        ? pitch
+        : current.connectorPitch
+      : normalizeStudPitch(patch.connectorPitch);
+  next[layerIndex] = { pitch, connectorPitch };
+  return {
+    ...grid,
+    layerSpacing: next.map((sp) => (sp.connectorPitch === sp.pitch ? { pitch: sp.pitch } : sp)),
+  };
+}
+
 function emptyLayer(width: number, height: number): Layer {
   return Array.from({ length: width * height }, () => ({ ...EMPTY_CELL }));
 }
@@ -201,11 +296,11 @@ export function createEmptyGrid(width: number, height: number): GridState {
   return {
     width,
     height,
-    rounding: { corners: false },
     partClearance: 0,
     holeClearance: 0,
     sidewaysHoleClearance: 0,
     layers: [emptyLayer(width, height)],
+    layerSpacing: [{ pitch: DEFAULT_STUD_PITCH }],
     activeLayer: 0,
     beams: [],
     discs: [],
@@ -889,7 +984,12 @@ export function resizeGrid(
 /** Appends a new empty layer on top and makes it active. */
 export function addLayer(grid: GridState): GridState {
   const layers = grid.layers.concat([emptyLayer(grid.width, grid.height)]);
-  return { ...grid, layers, activeLayer: layers.length - 1 };
+  // Inherits the pitch of the layer it is stacked on rather than resetting to 8mm: building
+  // several 10mm layers in a row is the normal case, and a stack that silently alternated pitch
+  // would be a surprise every time.
+  const spacing = allLayerSpacing(grid);
+  spacing.push(layerSpacingOf(grid, grid.layers.length - 1));
+  return { ...grid, layers, layerSpacing: spacing, activeLayer: layers.length - 1 };
 }
 
 /**
@@ -944,9 +1044,14 @@ export function duplicateLayer(grid: GridState, layerIndex: number): GridState {
     return [...shifted, ...copies];
   };
 
+  // The copy is built at the same spacing as the layer it came from — it is the same layer.
+  const spacing = allLayerSpacing(grid);
+  spacing.splice(at, 0, layerSpacingOf(grid, layerIndex));
+
   return {
     ...grid,
     layers,
+    layerSpacing: spacing,
     activeLayer: at,
     beams: shiftAndCopy(grid.beams, "copy"),
     discs: shiftAndCopy(grid.discs, "copy"),
@@ -958,6 +1063,7 @@ export function duplicateLayer(grid: GridState, layerIndex: number): GridState {
 export function removeLayer(grid: GridState, layerIndex: number): GridState {
   if (grid.layers.length <= 1) return grid;
   const layers = grid.layers.filter((_, i) => i !== layerIndex);
+  const spacing = allLayerSpacing(grid).filter((_, i) => i !== layerIndex);
   const activeLayer = Math.min(grid.activeLayer, layers.length - 1);
   // An angled beam names its layer by index, so removing a layer has to take its beams with it and
   // pull every beam above back down one — otherwise the survivors silently jump a layer.
@@ -970,7 +1076,7 @@ export function removeLayer(grid: GridState, layerIndex: number): GridState {
   const circles = (grid.circles ?? [])
     .filter((c) => c.layer !== layerIndex)
     .map((c) => (c.layer > layerIndex ? { ...c, layer: c.layer - 1 } : c));
-  return { ...grid, layers, activeLayer, beams, discs, circles };
+  return { ...grid, layers, layerSpacing: spacing, activeLayer, beams, discs, circles };
 }
 
 /** Swaps the layer index every beam on `a` or `b` refers to — see `removeLayer` on why beams need
@@ -1062,10 +1168,14 @@ export function moveLayerUp(grid: GridState, layerIndex: number): GridState {
   if (layerIndex >= grid.layers.length - 1 || layerIndex < 0) return grid;
   const layers = grid.layers.slice();
   [layers[layerIndex], layers[layerIndex + 1]] = [layers[layerIndex + 1], layers[layerIndex]];
+  // Spacing belongs to the layer, not to the slot it sits in, so it travels with it.
+  const spacing = allLayerSpacing(grid);
+  [spacing[layerIndex], spacing[layerIndex + 1]] = [spacing[layerIndex + 1], spacing[layerIndex]];
   const activeLayer = grid.activeLayer === layerIndex ? layerIndex + 1 : grid.activeLayer === layerIndex + 1 ? layerIndex : grid.activeLayer;
   return {
     ...grid,
     layers,
+    layerSpacing: spacing,
     activeLayer,
     beams: swapBeamLayers(grid.beams, layerIndex, layerIndex + 1),
     discs: swapBeamLayers(grid.discs, layerIndex, layerIndex + 1),
@@ -1078,10 +1188,14 @@ export function moveLayerDown(grid: GridState, layerIndex: number): GridState {
   if (layerIndex <= 0 || layerIndex >= grid.layers.length) return grid;
   const layers = grid.layers.slice();
   [layers[layerIndex], layers[layerIndex - 1]] = [layers[layerIndex - 1], layers[layerIndex]];
+  // Spacing belongs to the layer, not to the slot it sits in, so it travels with it.
+  const spacing = allLayerSpacing(grid);
+  [spacing[layerIndex], spacing[layerIndex - 1]] = [spacing[layerIndex - 1], spacing[layerIndex]];
   const activeLayer = grid.activeLayer === layerIndex ? layerIndex - 1 : grid.activeLayer === layerIndex - 1 ? layerIndex : grid.activeLayer;
   return {
     ...grid,
     layers,
+    layerSpacing: spacing,
     activeLayer,
     beams: swapBeamLayers(grid.beams, layerIndex, layerIndex - 1),
     discs: swapBeamLayers(grid.discs, layerIndex, layerIndex - 1),
