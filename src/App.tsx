@@ -116,6 +116,7 @@ export default function App() {
         onRedo={store.redo}
         canUndo={store.canUndo}
         canRedo={store.canRedo}
+        hiddenLayers={store.hiddenLayers}
       />
       <input
         ref={fileInput}
@@ -160,6 +161,8 @@ export default function App() {
             onWidthFractionChange={store.setWidthFraction}
             roundedEdges={store.roundedEdges}
             onRoundedEdgesChange={store.setRoundedEdges}
+            chamferMm={store.chamferMm}
+            onChamferMmChange={store.setChamferMm}
             blendXPos={store.blendXPos}
             onBlendXPosChange={store.setBlendXPos}
             blendXNeg={store.blendXNeg}
@@ -178,15 +181,12 @@ export default function App() {
             onCornerBlendXNegYNegChange={store.setCornerBlendXNegYNeg}
             circleDimension={store.circleDimension}
             onCircleDimensionChange={store.setCircleDimension}
-            circleCol={store.circleCol}
-            circleRow={store.circleRow}
-            onCircleCellChange={store.setCircleCell}
             circleHollow={store.circleHollow}
             onCircleHollowChange={store.setCircleHollow}
             circleOuterSquare={store.circleOuterSquare}
             onCircleOuterSquareChange={store.setCircleOuterSquare}
-            circlePlacementMode={store.circlePlacementMode}
-            onCirclePlacementModeChange={store.setCirclePlacementMode}
+            selectedCircle={store.selectedCircle}
+            onRemoveCircle={store.removeCircle}
             tool={store.tool}
             onToolChange={store.setTool}
             onResize={store.resize}
@@ -196,7 +196,42 @@ export default function App() {
             canRedo={store.canRedo}
             selectedCell={store.selectedCell}
             onRemoveCell={store.removeCell}
+            selectedBeam={(store.grid.beams ?? []).find((b) => b.id === store.selectedBeamId) ?? null}
+            onBeamHoleSolidAtChange={store.setBeamHoleSolidAt}
+            beamGusset={store.beamGusset}
+            beamFit={store.beamFit}
+            onBeamFitChange={store.setBeamFit}
+            onRefitBeam={store.refitBeam}
+            onBeamGussetChange={store.setBeamGusset}
+            onClearBeamFit={store.clearBeamFit}
+            onFlushBeam={store.flushBeamToBlocks}
+            onBeamAcrossOffsetChange={(mm) => store.updateBeam(store.selectedBeamId!, { acrossOffset: mm || undefined })}
+            onRemoveBeam={store.removeBeam}
+            beamAngleId={store.beamAngleId}
+            onBeamAngleIdChange={store.setBeamAngleId}
+            beamCustomDegrees={store.beamCustomDegrees}
+            onBeamCustomDegreesChange={store.setBeamCustomDegrees}
+            beamMirror={store.beamMirror}
+            beamReverse={store.beamReverse}
+            onBeamQuadrantChange={store.setBeamQuadrant}
+            beamHoles={store.beamHoles}
+            onBeamHolesChange={store.setBeamHoles}
+            beamHoleType={store.beamHoleType}
+            onBeamHoleTypeChange={store.setBeamHoleType}
+            beamHoleAxis={store.beamHoleAxis}
+            onBeamHoleAxisChange={store.setBeamHoleAxis}
+            onBeamHoleAxisAtChange={store.setBeamHoleAxisAt}
+            onClearBeamHoleAxes={store.clearBeamHoleAxes}
+            discSettings={store.discSettings}
+            onDiscSettingsChange={store.setDiscSettings}
+            onSlotMaskChange={store.setSlotMask}
+            selectedDisc={(store.grid.discs ?? []).find((d) => d.id === store.selectedDiscId) ?? null}
+            onRemoveDisc={store.removeDisc}
           />
+          {/* Only up while angled beams are actually what's being worked on — with the beam brush
+              picked, or a beam selected for editing. It's the same condition Toolbar's own beam
+              pickers use (`beamMode`), so the beam controls and the beam list appear and disappear
+              together instead of the list sitting under every cell brush as permanent furniture. */}
           <RoundingPanel rounding={store.grid.rounding} onCornersChange={store.setRoundingCorners} />
           <PrintFitPanel
             partClearance={store.grid.partClearance}
@@ -226,17 +261,36 @@ export default function App() {
               grid={store.grid}
               brush={store.brush}
               tool={store.tool}
+              beamHoleType={store.beamHoleType}
+              beamHoleAxis={store.beamHoleAxis}
+              beamFit={store.beamFit}
+              selectedCircle={store.selectedCircle}
+              onSelectCircle={store.selectCircle}
+              onBeginCircleDrag={store.beginCircleDrag}
+              onEndCircleDrag={store.endCircleDrag}
+              onBeginCellDrag={store.beginCellDrag}
+              onEndCellDrag={store.endCellDrag}
+              onMoveCircleRing={store.setCircleCentre}
               onPaintRect={store.paintRect}
               onSelectLayer={store.setActiveLayer}
               selectedCell={store.selectedCell}
               onSelectCell={store.selectCell}
               onAddLayer={store.addLayer}
+              onDuplicateLayer={store.duplicateLayer}
               onRemoveLayer={store.removeLayer}
               onMoveLayerUp={store.moveLayerUp}
               onMoveLayerDown={store.moveLayerDown}
               onResize={store.resize}
               hiddenLayers={store.hiddenLayers}
               onToggleLayerVisibility={store.toggleLayerVisibility}
+              selectedBeamId={store.selectedBeamId}
+              onSelectBeam={store.selectBeam}
+              selectedDiscId={store.selectedDiscId}
+              onSelectDisc={store.selectDisc}
+              onMoveDiscCentre={(id, centreX, centreY) => store.setDiscCentre(id, centreX, centreY)}
+              onBeginBeamDrag={store.checkpoint}
+              onMoveBeamAnchor={(id, anchorX, anchorY) => store.updateBeam(id, { anchorX, anchorY }, false)}
+              onMoveCell={store.moveCell}
             />
           </div>
         </div>

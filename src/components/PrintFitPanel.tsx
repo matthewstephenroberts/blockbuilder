@@ -31,6 +31,12 @@ export default function PrintFitPanel({
         Both default to 0, matching the reference part's own dimensions exactly. Increase either
         only if your printer needs more room than that to actually assemble.
       </p>
+      <p className="muted sm">
+        Hole clearance covers <strong>every</strong> hole a connector slides into — Technic holes,
+        stud holes, axle holes (both the cross's arms and its width, so it grows in proportion) and
+        a slot disc's centre bore. There is no separate axle setting: an axle that binds and a pin
+        that binds are the same problem, and one number keeps them in step.
+      </p>
       <label className="field" style={{ width: "100%" }}>
         <span>Hole clearance (mm)</span>
         <input

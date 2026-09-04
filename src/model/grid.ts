@@ -1,3 +1,14 @@
+import { AngledBeam } from "./angledBeam";
+import {
+  CircleRing,
+  centreForOrigin,
+  createCircleRing,
+  normalizeCircleRing,
+  originForCentre,
+  ringContains,
+  ringFootprint,
+} from "./circleRing";
+import { SlotDisc } from "./slotDisc";
 import { AXIS_SETTABLE_TYPES, BLEND_AWARE_TYPES, CellType, FLIP_AWARE_TYPES, HoleAxis, PlateFraction } from "./cellTypes";
 
 export interface Cell {
@@ -30,22 +41,23 @@ export interface Cell {
    * genuinely exterior (not shared with a neighbouring occupied cell), so rounding one block never
    * cuts into or gaps against the block next to it. */
   rounded?: boolean;
-  /** For CircleSolid cells: dimension of the group circle this cell is one slice of (2, 3, 4, 5 for 2x2, 3x3, 4x4, 5x5). */
-  circleDimension?: number;
-  /** For CircleSolid cells: this cell's 0-based column within the `circleDimension x circleDimension` group (see circleSolidGeometry.ts). */
-  circleCol?: number;
-  /** For CircleSolid cells: this cell's 0-based row within the `circleDimension x circleDimension` group. */
-  circleRow?: number;
-  /** For CircleSolid cells: when true, the group also has a concentric inner circle (one stud
-   * smaller in radius than the outer one) bored out of its centre, turning the solid disc into a
-   * ring/washer shape — see circleSolidGeometry.ts's own `hollow` param. */
-  circleHollow?: boolean;
-  /** For CircleSolid cells: when true, the OUTER boundary stays a plain square instead of being
-   * curved to the group's outer circle, so the group's own outward-facing sides stay flush and
-   * can butt up against neighbouring cells outside the group (e.g. a ring feature embedded flush
-   * inside a larger flat plate) — see circleSolidGeometry.ts's own `outerSquare` param. Independent
-   * of `circleHollow`: an outer-square + hollow cell is a plain square block with a round hole. */
-  circleOuterSquare?: boolean;
+  /**
+   * Cuts a 45° chamfer of this many mm along the cell's genuinely EXTERIOR edges — vertical ones
+   * and the top/bottom perimeter alike. Distinct from `rounded`, which is a full half-cell fillet
+   * on the vertical corners only (a Technic beam's round end); a chamfer is a small flat, and it's
+   * what a part that has to ENTER something else wants. The 1x1 blocks a slot disc dispenses are
+   * the case it exists for: the pocket has a lead-in chamfer at its mouth, and a matching chamfer
+   * on the block's own leading edges is the other half of not binding.
+   */
+  chamferMm?: number;
+  /**
+   * For CircleSolid cells: which CircleRing (see circleRing.ts) this cell is a slice of. The ring
+   * owns the circle's size, centre, hollow and outer-edge settings; this cell's own position
+   * within the group is derived from where it sits relative to the ring's origin, so there is
+   * nothing per-cell to keep in step. A CircleSolid cell without a live ring behind it is treated
+   * as a plain Solid — see geometry.ts.
+   */
+  circleId?: string;
   /**
    * For BLEND_AWARE_TYPES cells: when true, this cell's own +X-facing side is walked out and
    * bridged into a neighbouring hollow CircleSolid ring's surviving wall material (see
@@ -82,6 +94,9 @@ export interface Cell {
 }
 
 const EMPTY_CELL: Cell = { type: CellType.Empty };
+
+/** Bumped by every layer duplication, so copies made in the same millisecond still get distinct ids. */
+let copySeq = 0;
 
 /**
  * One stacked Z level. Its own stacking height isn't a separate setting any more — it's derived
@@ -143,6 +158,23 @@ export interface GridState {
   sidewaysHoleClearance: number;
   layers: Layer[];
   activeLayer: number;
+  /**
+   * Beams running at an angle across the X/Y plane, alongside the cell grid rather than inside it
+   * — see AngledBeam for why an angled beam can't be a cell type. Optional so a project file
+   * saved before angled beams existed still loads (see deserializeProject); treat a missing value
+   * as an empty list everywhere.
+   */
+  beams?: AngledBeam[];
+  /** Carousel/dispenser discs — see SlotDisc for why these aren't cells either. Optional for the
+   * same reason `beams` is: a project saved before them still loads. */
+  discs?: SlotDisc[];
+  /**
+   * Circle groups. Unlike beams and discs these DO own cells — a ring describes the shared circle
+   * its member cells are each cut to, and the cells (carrying `circleId`) are what actually get
+   * built. Optional for the same back-compat reason as the other two: a file saved when circles
+   * were stored per cell is migrated on load (see deserializeProject).
+   */
+  circles?: CircleRing[];
 }
 
 export function indexOf(grid: Pick<GridState, "width">, x: number, y: number): number {
@@ -175,6 +207,9 @@ export function createEmptyGrid(width: number, height: number): GridState {
     sidewaysHoleClearance: 0,
     layers: [emptyLayer(width, height)],
     activeLayer: 0,
+    beams: [],
+    discs: [],
+    circles: [],
   };
 }
 
@@ -257,8 +292,7 @@ export function withCell(
 /** The 8 opt-in join/corner-blend flags a freshly-painted cell can carry — see Cell's own doc on
  * each field for what they do. Passed as one object (rather than 8 more positional params) since
  * withRect's own parameter list is already long; only meaningful when `type` is in
- * BLEND_AWARE_TYPES, same gating `withRect` already applies to circleDimension etc for non-circle
- * types. */
+ * BLEND_AWARE_TYPES, same gating `withRect` already applies to `circleId` for non-circle types. */
 export interface BlendFlags {
   blendXPos?: boolean;
   blendXNeg?: boolean;
@@ -282,12 +316,9 @@ export function withRect(
   flip?: boolean,
   rounded?: boolean,
   widthFraction?: PlateFraction,
-  circleDimension?: number,
-  circleCol?: number,
-  circleRow?: number,
-  circleHollow?: boolean,
-  circleOuterSquare?: boolean,
+  circleId?: string,
   blend?: BlendFlags,
+  chamferMm?: number,
 ): GridState {
   const minX = Math.max(0, Math.min(x0, x1));
   const maxX = Math.min(grid.width - 1, Math.max(x0, x1));
@@ -309,11 +340,7 @@ export function withRect(
         layer[i].flip !== resolvedFlip ||
         layer[i].rounded !== rounded ||
         layer[i].widthFraction !== widthFraction ||
-        layer[i].circleDimension !== circleDimension ||
-        layer[i].circleCol !== circleCol ||
-        layer[i].circleRow !== circleRow ||
-        layer[i].circleHollow !== circleHollow ||
-        layer[i].circleOuterSquare !== circleOuterSquare ||
+        layer[i].circleId !== circleId ||
         layer[i].blendXPos !== b?.blendXPos ||
         layer[i].blendXNeg !== b?.blendXNeg ||
         layer[i].blendYPos !== b?.blendYPos ||
@@ -321,7 +348,8 @@ export function withRect(
         layer[i].cornerBlendXPosYPos !== b?.cornerBlendXPosYPos ||
         layer[i].cornerBlendXPosYNeg !== b?.cornerBlendXPosYNeg ||
         layer[i].cornerBlendXNegYPos !== b?.cornerBlendXNegYPos ||
-        layer[i].cornerBlendXNegYNeg !== b?.cornerBlendXNegYNeg
+        layer[i].cornerBlendXNegYNeg !== b?.cornerBlendXNegYNeg ||
+        layer[i].chamferMm !== chamferMm
       ) {
         layer[i] = {
           type,
@@ -329,12 +357,9 @@ export function withRect(
           plateFraction,
           flip: resolvedFlip,
           rounded,
+          chamferMm,
           widthFraction,
-          circleDimension,
-          circleCol,
-          circleRow,
-          circleHollow,
-          circleOuterSquare,
+          circleId,
           blendXPos: b?.blendXPos,
           blendXNeg: b?.blendXNeg,
           blendYPos: b?.blendYPos,
@@ -355,70 +380,261 @@ export function withRect(
 }
 
 /**
- * Paints a whole `dimension x dimension` CircleSolid group in one shot, centred on
- * (centerX, centerY) — the "auto-fill from center" placement mode, so a user doesn't have to
- * manually select and paint each of the group's own cells one at a time to get a full circle.
+ * Places a whole circle in one action: creates the CircleRing and paints every cell of its
+ * `dimension x dimension` footprint as a member of it.
  *
- * For an odd dimension, (centerX, centerY) becomes the exact middle cell. For an even dimension
- * (no single middle cell), it becomes the group's own col=0/row=0 cell (top-left) — an arbitrary
- * but consistent choice, matching `withCircleGroup`'s own col/row numbering.
+ * This is now the ONLY way a circle gets placed. It used to be one of two modes, the other being
+ * a per-cell brush driven by a col/row picker — but that picker existed only because a cell had
+ * to carry its own position within the group, and it no longer does. A partial circle is made by
+ * placing the whole ring and then erasing the cells you don't want (see `removeCircleCell`): the
+ * survivors keep the ring, so they keep the correct arc.
  *
- * Cells that would fall outside the grid are silently skipped (clipped), same as `withRect`.
+ * For an odd dimension the group centres exactly on (centreX, centreY); an even one leans toward
+ * -X/-Y, matching where the old auto-centre mode put it. Cells outside the grid are skipped, so a
+ * ring can hang off the edge — its geometry is unaffected, since the circle is defined by the ring
+ * rather than by which of its cells happen to exist.
  */
-export function withCircleGroup(
+export function withCircleRing(
   grid: GridState,
-  centerX: number,
-  centerY: number,
+  centreX: number,
+  centreY: number,
   dimension: number,
   plateFraction?: PlateFraction,
   rounded?: boolean,
   hollow?: boolean,
   outerSquare?: boolean,
-): GridState {
-  const startX = centerX - Math.floor((dimension - 1) / 2);
-  const startY = centerY - Math.floor((dimension - 1) / 2);
+): { grid: GridState; ring: CircleRing } {
+  const ring = createCircleRing(grid.activeLayer, centreX, centreY, dimension, {
+    hollow: hollow ?? false,
+    outerSquare: outerSquare ?? false,
+    plateFraction,
+    rounded,
+  });
+  return { grid: stampCircleRing(grid, ring), ring };
+}
+
+/**
+ * Adds the ring and paints its footprint. Split out from `withCircleRing` because resizing an
+ * existing ring is the same operation with an id that already exists — see `resizeCircleRing`.
+ */
+function stampCircleRing(grid: GridState, ring: CircleRing): GridState {
   const layer = getActiveLayer(grid).slice();
-  let changed = false;
-  for (let dy = 0; dy < dimension; dy++) {
-    for (let dx = 0; dx < dimension; dx++) {
-      const x = startX + dx;
-      const y = startY + dy;
-      if (!inBounds(grid, x, y)) continue;
-      const col = dx;
-      // World Y increases "up" (see GridEditor's own cellAt comment) while row 0 is meant to read
-      // as the group's TOP — so row must count DOWN as world y counts up, same inversion
-      // circleSolidGeometry.ts's own cellOffsetY applies.
-      const row = dimension - 1 - dy;
-      const i = indexOf(grid, x, y);
-      const next: Cell = {
-        type: CellType.CircleSolid,
-        plateFraction,
-        rounded,
-        circleDimension: dimension,
-        circleCol: col,
-        circleRow: row,
-        circleHollow: hollow,
-        circleOuterSquare: outerSquare,
-      };
-      if (
-        layer[i].type !== next.type ||
-        layer[i].plateFraction !== next.plateFraction ||
-        layer[i].circleDimension !== next.circleDimension ||
-        layer[i].circleCol !== next.circleCol ||
-        layer[i].circleRow !== next.circleRow ||
-        layer[i].rounded !== next.rounded ||
-        layer[i].circleHollow !== next.circleHollow ||
-        layer[i].circleOuterSquare !== next.circleOuterSquare
-      ) {
-        layer[i] = next;
-        changed = true;
-      }
-    }
+  for (const { x, y } of ringFootprint(ring)) {
+    if (!inBounds(grid, x, y)) continue;
+    layer[indexOf(grid, x, y)] = {
+      type: CellType.CircleSolid,
+      plateFraction: ring.plateFraction,
+      rounded: ring.rounded,
+      circleId: ring.id,
+    };
   }
-  if (!changed) return grid;
   const layers = grid.layers.slice();
   layers[grid.activeLayer] = layer;
-  return { ...grid, layers };
+  const others = (grid.circles ?? []).filter((c) => c.id !== ring.id);
+  return { ...grid, layers, circles: [...others, ring] };
+}
+
+/** The ring a cell belongs to, or null — the lookup every consumer of a CircleSolid cell needs. */
+export function circleRingOf(grid: GridState, cell: Cell): CircleRing | null {
+  if (cell.type !== CellType.CircleSolid || !cell.circleId) return null;
+  return (grid.circles ?? []).find((c) => c.id === cell.circleId) ?? null;
+}
+
+/** The ring at (x, y) on the active layer, or null. */
+export function circleRingAt(grid: GridState, x: number, y: number): CircleRing | null {
+  if (!inBounds(grid, x, y)) return null;
+  return circleRingOf(grid, getActiveLayer(grid)[indexOf(grid, x, y)]);
+}
+
+/**
+ * The ring on the active layer whose FOOTPRINT covers (x, y), preferring the smallest — what a
+ * CircleSolid brush stroke lands in when it's aimed at a hole left in an existing circle. Painting
+ * there rejoins the existing ring rather than starting a new one, which is what makes a partial
+ * circle reversible: erase a cell, paint it back, and it comes back with the same arc.
+ *
+ * Smallest-first because a small ring nested inside a bigger one is the ambiguous case, and the
+ * tighter ring is the one whose arc a cell at that position visibly belongs to.
+ */
+export function circleRingCovering(grid: GridState, x: number, y: number): CircleRing | null {
+  const covering = (grid.circles ?? [])
+    .filter((c) => c.layer === grid.activeLayer && ringContains(c, x, y))
+    .sort((a, b) => a.dimension - b.dimension);
+  return covering[0] ?? null;
+}
+
+/** Every cell on the active layer that currently belongs to `ringId`. */
+export function circleRingCells(grid: GridState, ringId: string): { x: number; y: number }[] {
+  const layer = getActiveLayer(grid);
+  const found: { x: number; y: number }[] = [];
+  for (let y = 0; y < grid.height; y++) {
+    for (let x = 0; x < grid.width; x++) {
+      if (layer[indexOf(grid, x, y)].circleId === ringId) found.push({ x, y });
+    }
+  }
+  return found;
+}
+
+/**
+ * Applies a partial change to one ring. Everything a circle's shape depends on lives here, so
+ * this single call is what the old `withCircleGroupFlags` fan-out across every member cell became
+ * — hollowing a 13x13 ring is now one object write instead of 169 cell writes.
+ */
+export function updateCircleRing(grid: GridState, id: string, patch: Partial<CircleRing>): GridState {
+  const circles = grid.circles ?? [];
+  if (!circles.some((c) => c.id === id)) return grid;
+  return {
+    ...grid,
+    circles: circles.map((c) => (c.id === id ? normalizeCircleRing({ ...c, ...patch, id: c.id }) : c)),
+  };
+}
+
+/**
+ * Changes a ring's dimension in place, growing or shrinking it about its own centre and repainting
+ * the footprint to match.
+ *
+ * Cells the ring loses on a shrink are cleared only if they still belonged to it — a cell someone
+ * painted something else into inside the old footprint is left alone, since it stopped being part
+ * of the circle the moment it was overpainted.
+ */
+export function resizeCircleRing(grid: GridState, id: string, dimension: number): GridState {
+  const ring = (grid.circles ?? []).find((c) => c.id === id);
+  if (!ring || dimension === ring.dimension || dimension < 2) return grid;
+  const { centreX, centreY } = centreForOrigin(ring);
+  const next: CircleRing = {
+    ...ring,
+    dimension,
+    ...originForCentre(centreX, centreY, dimension),
+  };
+
+  // Clear the members that fall outside the new footprint first, then stamp the new one.
+  const layer = getActiveLayer(grid).slice();
+  for (const { x, y } of circleRingCells(grid, id)) {
+    if (ringContains(next, x, y)) continue;
+    layer[indexOf(grid, x, y)] = { ...EMPTY_CELL };
+  }
+  const layers = grid.layers.slice();
+  layers[grid.activeLayer] = layer;
+  return stampCircleRing({ ...grid, layers }, next);
+}
+
+/**
+ * Moves a ring by (dx, dy), carrying its member cells with it and overwriting whatever is at the
+ * destination — the same "pick it up and put it there" as `moveCell`, not a swap.
+ *
+ * For a DRAG, apply this to the grid as it was when the gesture began, with the total offset so
+ * far, rather than stepping the current grid one square at a time. Stepping destroys the build:
+ * each step overwrites the cells under the ring's new position and then clears them again as the
+ * ring moves on, so a drag across the plan leaves a trail of erased squares behind it. Recomputing
+ * from the pre-drag snapshot means anything the ring passes over comes back when it leaves, and
+ * only where it is finally dropped gets overwritten. See the store's `setCircleCentre`.
+ */
+export function moveCircleRing(grid: GridState, id: string, dx: number, dy: number): GridState {
+  const ring = (grid.circles ?? []).find((c) => c.id === id);
+  if (!ring || (dx === 0 && dy === 0)) return grid;
+  const members = circleRingCells(grid, id);
+  const layer = getActiveLayer(grid).slice();
+  const moved = members
+    .map((m) => ({ cell: layer[indexOf(grid, m.x, m.y)], x: m.x + dx, y: m.y + dy }))
+    .filter((m) => inBounds(grid, m.x, m.y));
+  for (const m of members) layer[indexOf(grid, m.x, m.y)] = { ...EMPTY_CELL };
+  for (const m of moved) layer[indexOf(grid, m.x, m.y)] = m.cell;
+  const layers = grid.layers.slice();
+  layers[grid.activeLayer] = layer;
+  return updateCircleRing({ ...grid, layers }, id, { originX: ring.originX + dx, originY: ring.originY + dy });
+}
+
+/**
+ * Applies cell properties — height, edges, chamfer — to every cell that belongs to a ring, and
+ * records the ones that are ring-wide defaults on the ring itself so cells stamped into it later
+ * (a resize, or a cell painted back into a gap) come out matching.
+ *
+ * The ring's members, not its footprint rectangle: a square inside the footprint that someone
+ * painted something else into isn't part of the circle any more, and a "change the circle's height"
+ * gesture has no business reaching it.
+ */
+export function withCircleRingCellProperties(
+  grid: GridState,
+  id: string,
+  changes: { plateFraction?: PlateFraction; rounded?: boolean; chamferMm?: number; widthFraction?: PlateFraction },
+): GridState {
+  const members = circleRingCells(grid, id);
+  if (members.length === 0) return grid;
+  const layer = getActiveLayer(grid).slice();
+  let changed = false;
+  for (const m of members) {
+    const i = indexOf(grid, m.x, m.y);
+    const next = { ...layer[i], ...changes };
+    if (
+      next.plateFraction !== layer[i].plateFraction ||
+      next.rounded !== layer[i].rounded ||
+      next.chamferMm !== layer[i].chamferMm ||
+      next.widthFraction !== layer[i].widthFraction
+    ) {
+      layer[i] = next;
+      changed = true;
+    }
+  }
+  const layers = grid.layers.slice();
+  if (changed) layers[grid.activeLayer] = layer;
+  const withCells = changed ? { ...grid, layers } : grid;
+  const ringPatch: Partial<CircleRing> = {};
+  if ("plateFraction" in changes) ringPatch.plateFraction = changes.plateFraction;
+  if ("rounded" in changes) ringPatch.rounded = changes.rounded;
+  return Object.keys(ringPatch).length > 0 ? updateCircleRing(withCells, id, ringPatch) : withCells;
+}
+
+/**
+ * Deletes a ring and clears every cell that belonged to it — the whole circle in one action, for
+ * when you want it gone rather than trimmed. (Trimming is erasing cells; the ring then ends on its
+ * own once the last one goes, see gcCircleRings.)
+ */
+export function removeCircleRing(grid: GridState, id: string): GridState {
+  const members = circleRingCells(grid, id);
+  if (members.length === 0) return gcCircleRings({ ...grid, circles: (grid.circles ?? []).filter((c) => c.id !== id) });
+  const layer = getActiveLayer(grid).slice();
+  for (const m of members) layer[indexOf(grid, m.x, m.y)] = { ...EMPTY_CELL };
+  const layers = grid.layers.slice();
+  layers[grid.activeLayer] = layer;
+  return gcCircleRings({ ...grid, layers, circles: (grid.circles ?? []).filter((c) => c.id !== id) });
+}
+
+/**
+ * Drops any ring that no longer has a single member cell on its layer, and clears a `circleId`
+ * pointing at a ring that no longer exists.
+ *
+ * Erasing cells is how a partial circle is made, so "the last member was erased" is the ordinary
+ * way a ring ends — there's no separate delete gesture to hang the cleanup off. Run this after any
+ * edit that can clear cells.
+ */
+export function gcCircleRings(grid: GridState): GridState {
+  const circles = grid.circles ?? [];
+  if (circles.length === 0) return grid;
+  const live = new Set<string>();
+  for (let li = 0; li < grid.layers.length; li++) {
+    const layer = grid.layers[li];
+    for (const cell of layer) {
+      if (cell.type === CellType.CircleSolid && cell.circleId) live.add(cell.circleId);
+    }
+  }
+  const kept = circles.filter((c) => live.has(c.id));
+  const keptIds = new Set(kept.map((c) => c.id));
+  let layersChanged = false;
+  const layers = grid.layers.map((layer) => {
+    let changed = false;
+    const next = layer.map((cell) => {
+      if (cell.circleId && !keptIds.has(cell.circleId)) {
+        changed = true;
+        const { circleId: _dropped, ...rest } = cell;
+        return rest;
+      }
+      return cell;
+    });
+    if (!changed) return layer;
+    layersChanged = true;
+    return next;
+  });
+  if (kept.length === circles.length && !layersChanged) return grid;
+  return { ...grid, circles: kept, layers };
 }
 
 /**
@@ -440,6 +656,7 @@ export function withPropertiesRect(
     flip?: boolean;
     plateFraction?: PlateFraction;
     rounded?: boolean;
+    chamferMm?: number;
     widthFraction?: PlateFraction;
     blendXPos?: boolean;
     blendXNeg?: boolean;
@@ -469,6 +686,7 @@ export function withPropertiesRect(
         : undefined;
       const nextPlateFraction = changes.plateFraction !== undefined ? changes.plateFraction : cell.plateFraction;
       const nextRounded = changes.rounded !== undefined ? changes.rounded : cell.rounded;
+      const nextChamferMm = changes.chamferMm !== undefined ? changes.chamferMm : cell.chamferMm;
       const nextWidthFraction = changes.widthFraction !== undefined ? changes.widthFraction : cell.widthFraction;
       const wantsBlend = BLEND_AWARE_TYPES.has(cell.type);
       const nextBlendXPos = wantsBlend && changes.blendXPos !== undefined ? changes.blendXPos : cell.blendXPos;
@@ -484,6 +702,7 @@ export function withPropertiesRect(
       const nextCornerBlendXNegYNeg =
         wantsBlend && changes.cornerBlendXNegYNeg !== undefined ? changes.cornerBlendXNegYNeg : cell.cornerBlendXNegYNeg;
       if (
+        cell.chamferMm !== nextChamferMm ||
         cell.axis !== nextAxis ||
         cell.flip !== nextFlip ||
         cell.plateFraction !== nextPlateFraction ||
@@ -504,6 +723,7 @@ export function withPropertiesRect(
           flip: nextFlip,
           plateFraction: nextPlateFraction,
           rounded: nextRounded,
+          chamferMm: nextChamferMm,
           widthFraction: nextWidthFraction,
           blendXPos: nextBlendXPos,
           blendXNeg: nextBlendXNeg,
@@ -548,17 +768,122 @@ export function clearRect(grid: GridState, x0: number, y0: number, x1: number, y
 }
 
 /** Resizes every layer's footprint, preserving existing cell contents at their original (x, y) where they still fit. */
-export function resizeGrid(grid: GridState, width: number, height: number): GridState {
+/**
+ * Which edge a resize grows from (or trims into). "start" is x=0 / y=0 — the original behaviour,
+ * where everything stays put and the new studs all appear on the far side.
+ */
+export type ResizeAnchorX = "start" | "centre" | "end";
+export type ResizeAnchorY = "start" | "centre" | "end";
+export interface ResizeAnchor {
+  x: ResizeAnchorX;
+  y: ResizeAnchorY;
+}
+
+export const DEFAULT_RESIZE_ANCHOR: ResizeAnchor = { x: "start", y: "start" };
+
+/**
+ * The occupied span along one axis across every layer, plus any beams and discs — or null when the
+ * build is empty. Used by centre anchoring, which has to know where the CONTENT is rather than just
+ * how much the grid grew.
+ */
+function contentSpan(grid: GridState, axis: "x" | "y"): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  const see = (v: number) => {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  };
+  for (const layer of grid.layers) {
+    for (let y = 0; y < grid.height; y++) {
+      for (let x = 0; x < grid.width; x++) {
+        if (layer[y * grid.width + x].type === CellType.Empty) continue;
+        see(axis === "x" ? x : y);
+      }
+    }
+  }
+  for (const b of grid.beams ?? []) see(axis === "x" ? b.anchorX : b.anchorY);
+  for (const d of grid.discs ?? []) see(axis === "x" ? d.centreX : d.centreY);
+  // A ring's own cells are already counted above; its origin is included so an all-but-erased
+  // circle still anchors where its circle actually is rather than where its last cell is.
+  for (const c of grid.circles ?? []) see(axis === "x" ? c.originX : c.originY);
+  return max < min ? null : { min, max };
+}
+
+/**
+ * How far the existing content shifts along one axis. Negative when shrinking from the start.
+ *
+ * "start" and "end" are pure size arithmetic, and both survive being applied one stud at a time:
+ * start never moves anything, and end moves by the delta, so four +1 steps land where a single +4
+ * would. Centre CANNOT work that way. Half of a delta of 1 rounds to 0, so growing a stud at a
+ * time — which is exactly what the spinner arrows do — left the build pinned to the corner and made
+ * the whole setting look broken.
+ *
+ * So centre is measured from the content itself: put the occupied span in the middle of the new
+ * grid, wherever it happens to start. That is idempotent and step-size independent — one +4 and
+ * four +1s agree, and re-applying it changes nothing.
+ */
+function resizeOffset(
+  grid: GridState,
+  oldSize: number,
+  newSize: number,
+  anchor: "start" | "centre" | "end",
+  axis: "x" | "y",
+): number {
+  const delta = newSize - oldSize;
+  if (anchor === "start") return 0;
+  if (anchor === "end") return delta;
+  const span = contentSpan(grid, axis);
+  // Nothing built yet: there is no content to centre, so fall back to splitting the new space.
+  if (!span) return Math.floor(delta / 2);
+  const occupied = span.max - span.min + 1;
+  return Math.floor((newSize - occupied) / 2) - span.min;
+}
+
+/**
+ * Resizes the grid, keeping the existing content anchored to whichever edge `anchor` names.
+ *
+ * Beams and discs move with the cells: they address the grid by cell coordinate, so leaving them
+ * behind while every cell around them shifts would silently take them off their mountings. Any
+ * whose anchor cell ends up outside the new grid is dropped, the same way cells that fall outside
+ * are dropped — a shrink discards what no longer fits, whichever kind of thing it is.
+ */
+export function resizeGrid(
+  grid: GridState,
+  width: number,
+  height: number,
+  anchor: ResizeAnchor = DEFAULT_RESIZE_ANCHOR,
+): GridState {
+  const dx = resizeOffset(grid, grid.width, width, anchor.x, "x");
+  const dy = resizeOffset(grid, grid.height, height, anchor.y, "y");
+
   const layers = grid.layers.map((layer) => {
     const next = emptyLayer(width, height);
-    for (let y = 0; y < Math.min(height, grid.height); y++) {
-      for (let x = 0; x < Math.min(width, grid.width); x++) {
-        next[y * width + x] = layer[indexOf(grid, x, y)];
+    for (let y = 0; y < height; y++) {
+      const srcY = y - dy;
+      if (srcY < 0 || srcY >= grid.height) continue;
+      for (let x = 0; x < width; x++) {
+        const srcX = x - dx;
+        if (srcX < 0 || srcX >= grid.width) continue;
+        next[y * width + x] = layer[indexOf(grid, srcX, srcY)];
       }
     }
     return next;
   });
-  return { ...grid, width, height, layers };
+
+  const within = (x: number, y: number) => x >= 0 && x < width && y >= 0 && y < height;
+  const beams = (grid.beams ?? [])
+    .map((b) => ({ ...b, anchorX: b.anchorX + dx, anchorY: b.anchorY + dy }))
+    .filter((b) => within(b.anchorX, b.anchorY));
+  const discs = (grid.discs ?? [])
+    .map((d) => ({ ...d, centreX: d.centreX + dx, centreY: d.centreY + dy }))
+    .filter((d) => within(d.centreX, d.centreY));
+
+  // A ring moves with its cells, and is NOT dropped for landing outside: its members are what
+  // gets clipped, and gcCircleRings then removes any ring that lost all of them. Dropping the ring
+  // itself on an origin check would strip the circle off cells that survived the resize.
+  const circles = (grid.circles ?? []).map((c) => ({ ...c, originX: c.originX + dx, originY: c.originY + dy }));
+
+  return gcCircleRings({ ...grid, width, height, layers, beams, discs, circles });
 }
 
 /** Appends a new empty layer on top and makes it active. */
@@ -567,12 +892,164 @@ export function addLayer(grid: GridState): GridState {
   return { ...grid, layers, activeLayer: layers.length - 1 };
 }
 
+/**
+ * Copies a layer, inserting the copy directly above it and making it active.
+ *
+ * Everything ON the layer comes with it, not just the cells: its beams, its slot discs and its
+ * circle rings are all copied too, with fresh ids — a duplicate that shared ids would have two
+ * layers' worth of cells pointing at one ring, so editing either would change both, and deleting
+ * one layer would strip the circle off the other.
+ *
+ * Layers above shift up one, and every element that names a layer by index shifts with them (same
+ * remap `removeLayer` does in the other direction).
+ */
+export function duplicateLayer(grid: GridState, layerIndex: number): GridState {
+  if (layerIndex < 0 || layerIndex >= grid.layers.length) return grid;
+  const at = layerIndex + 1;
+  // A monotonic counter, not the clock: duplicating the same layer twice inside one millisecond
+  // otherwise mints the SAME id twice, and two beams sharing an id is a part that deletes or edits
+  // in pairs.
+  copySeq += 1;
+  const stamp = `${Date.now().toString(36)}${copySeq}`;
+
+  // New ring ids first: the copied CELLS have to point at the copies, not the originals.
+  const ringIdMap = new Map<string, string>();
+  const circles = (grid.circles ?? []).map((c) => (c.layer > layerIndex ? { ...c, layer: c.layer + 1 } : c));
+  for (const ring of grid.circles ?? []) {
+    if (ring.layer !== layerIndex) continue;
+    const copy = { ...ring, id: `${ring.id}-copy-${stamp}-${circles.length}`, layer: at };
+    ringIdMap.set(ring.id, copy.id);
+    circles.push(copy);
+  }
+
+  const source = grid.layers[layerIndex];
+  const copiedCells: Layer = source.map((cell) => {
+    const next = { ...cell };
+    if (next.circleId) {
+      const mapped = ringIdMap.get(next.circleId);
+      // A circle cell whose ring isn't on this layer has nothing to point at in the copy — it is
+      // already broken, and copying the dangling id would spread the breakage.
+      if (mapped) next.circleId = mapped;
+      else delete next.circleId;
+    }
+    return next;
+  });
+  const layers = [...grid.layers.slice(0, at), copiedCells, ...grid.layers.slice(at)];
+
+  const shiftAndCopy = <T extends { id: string; layer: number }>(items: T[] | undefined, tag: string): T[] => {
+    const shifted = (items ?? []).map((it) => (it.layer > layerIndex ? { ...it, layer: it.layer + 1 } : it));
+    const copies = (items ?? [])
+      .filter((it) => it.layer === layerIndex)
+      .map((it, i) => ({ ...it, id: `${it.id}-${tag}-${stamp}-${i}`, layer: at }));
+    return [...shifted, ...copies];
+  };
+
+  return {
+    ...grid,
+    layers,
+    activeLayer: at,
+    beams: shiftAndCopy(grid.beams, "copy"),
+    discs: shiftAndCopy(grid.discs, "copy"),
+    circles,
+  };
+}
+
 /** Removes the given layer (never the last remaining one), clamping the active layer index. */
 export function removeLayer(grid: GridState, layerIndex: number): GridState {
   if (grid.layers.length <= 1) return grid;
   const layers = grid.layers.filter((_, i) => i !== layerIndex);
   const activeLayer = Math.min(grid.activeLayer, layers.length - 1);
-  return { ...grid, layers, activeLayer };
+  // An angled beam names its layer by index, so removing a layer has to take its beams with it and
+  // pull every beam above back down one — otherwise the survivors silently jump a layer.
+  const beams = (grid.beams ?? [])
+    .filter((b) => b.layer !== layerIndex)
+    .map((b) => (b.layer > layerIndex ? { ...b, layer: b.layer - 1 } : b));
+  const discs = (grid.discs ?? [])
+    .filter((d) => d.layer !== layerIndex)
+    .map((d) => (d.layer > layerIndex ? { ...d, layer: d.layer - 1 } : d));
+  const circles = (grid.circles ?? [])
+    .filter((c) => c.layer !== layerIndex)
+    .map((c) => (c.layer > layerIndex ? { ...c, layer: c.layer - 1 } : c));
+  return { ...grid, layers, activeLayer, beams, discs, circles };
+}
+
+/** Swaps the layer index every beam on `a` or `b` refers to — see `removeLayer` on why beams need
+ * remapping whenever the layer list is reordered. */
+function swapBeamLayers<T extends { layer: number }>(items: T[] | undefined, a: number, b: number): T[] {
+  return (items ?? []).map((item) =>
+    item.layer === a ? { ...item, layer: b } : item.layer === b ? { ...item, layer: a } : item,
+  );
+}
+
+/**
+ * Moves one cell's contents to another square on the same layer, leaving the source empty and
+ * overwriting whatever was at the destination. A no-op when the source is empty or the two are the
+ * same square — moving nothing shouldn't cost an undo entry.
+ *
+ * Deliberately a plain move, not a swap: the gesture it backs (Alt-drag on the plan) reads as
+ * "pick this up and put it there", and a swap would silently drag a second, unrelated cell along
+ * for the ride.
+ *
+ * For a DRAG, apply this to the grid as it was when the gesture began, always from the ORIGINAL
+ * source square to wherever the pointer is now — never step it from one intermediate square to the
+ * next. Stepping destroys the plan: every square the cell is dragged across is overwritten and then
+ * blanked as the cell moves on, so a drag leaves a trail of erased cells behind it. Recomputing
+ * from the pre-drag snapshot means what the cell passes over comes back when it leaves, and only
+ * the square it is dropped on is overwritten. Same rule, same reason, as moveCircleRing.
+ */
+export function moveCell(grid: GridState, fromX: number, fromY: number, toX: number, toY: number): GridState {
+  if (!inBounds(grid, fromX, fromY) || !inBounds(grid, toX, toY)) return grid;
+  if (fromX === toX && fromY === toY) return grid;
+  const layer = grid.layers[grid.activeLayer];
+  const cell = layer[indexOf(grid, fromX, fromY)];
+  if (cell.type === CellType.Empty) return grid;
+  const next = layer.slice();
+  // A circle cell dragged outside its own ring's footprint stops being a slice of that circle —
+  // there is no (col, row) for it there — so it lands as the plain solid it now is, rather than
+  // keeping a membership that would silently build as the ring's (0, 0) corner.
+  const ring = circleRingOf(grid, cell);
+  const moved = ring && !ringContains(ring, toX, toY) ? (({ circleId: _dropped, ...rest }) => rest)(cell) : cell;
+  next[indexOf(grid, toX, toY)] = moved;
+  next[indexOf(grid, fromX, fromY)] = { ...EMPTY_CELL };
+  const layers = grid.layers.slice();
+  layers[grid.activeLayer] = next;
+  return { ...grid, layers };
+}
+
+/** Adds an angled beam and makes it the project's newest element. */
+export function addBeam(grid: GridState, beam: AngledBeam): GridState {
+  return { ...grid, beams: [...(grid.beams ?? []), beam] };
+}
+
+/** Applies a partial change to one beam by id; returns the grid unchanged if there's no such beam. */
+export function updateBeam(grid: GridState, id: string, patch: Partial<AngledBeam>): GridState {
+  const beams = grid.beams ?? [];
+  if (!beams.some((b) => b.id === id)) return grid;
+  return { ...grid, beams: beams.map((b) => (b.id === id ? { ...b, ...patch, id: b.id } : b)) };
+}
+
+export function removeBeam(grid: GridState, id: string): GridState {
+  const beams = grid.beams ?? [];
+  if (!beams.some((b) => b.id === id)) return grid;
+  return { ...grid, beams: beams.filter((b) => b.id !== id) };
+}
+
+/** Adds a slot disc. */
+export function addDisc(grid: GridState, disc: SlotDisc): GridState {
+  return { ...grid, discs: [...(grid.discs ?? []), disc] };
+}
+
+/** Applies a partial change to one disc by id; returns the grid unchanged if there's no such disc. */
+export function updateDisc(grid: GridState, id: string, patch: Partial<SlotDisc>): GridState {
+  const discs = grid.discs ?? [];
+  if (!discs.some((d) => d.id === id)) return grid;
+  return { ...grid, discs: discs.map((d) => (d.id === id ? { ...d, ...patch, id: d.id } : d)) };
+}
+
+export function removeDisc(grid: GridState, id: string): GridState {
+  const discs = grid.discs ?? [];
+  if (!discs.some((d) => d.id === id)) return grid;
+  return { ...grid, discs: discs.filter((d) => d.id !== id) };
 }
 
 export function setActiveLayer(grid: GridState, layerIndex: number): GridState {
@@ -586,7 +1063,14 @@ export function moveLayerUp(grid: GridState, layerIndex: number): GridState {
   const layers = grid.layers.slice();
   [layers[layerIndex], layers[layerIndex + 1]] = [layers[layerIndex + 1], layers[layerIndex]];
   const activeLayer = grid.activeLayer === layerIndex ? layerIndex + 1 : grid.activeLayer === layerIndex + 1 ? layerIndex : grid.activeLayer;
-  return { ...grid, layers, activeLayer };
+  return {
+    ...grid,
+    layers,
+    activeLayer,
+    beams: swapBeamLayers(grid.beams, layerIndex, layerIndex + 1),
+    discs: swapBeamLayers(grid.discs, layerIndex, layerIndex + 1),
+    circles: swapBeamLayers(grid.circles, layerIndex, layerIndex + 1),
+  };
 }
 
 /** Moves a layer down one position (lower index, toward the bottom). */
@@ -595,7 +1079,14 @@ export function moveLayerDown(grid: GridState, layerIndex: number): GridState {
   const layers = grid.layers.slice();
   [layers[layerIndex], layers[layerIndex - 1]] = [layers[layerIndex - 1], layers[layerIndex]];
   const activeLayer = grid.activeLayer === layerIndex ? layerIndex - 1 : grid.activeLayer === layerIndex - 1 ? layerIndex : grid.activeLayer;
-  return { ...grid, layers, activeLayer };
+  return {
+    ...grid,
+    layers,
+    activeLayer,
+    beams: swapBeamLayers(grid.beams, layerIndex, layerIndex - 1),
+    discs: swapBeamLayers(grid.discs, layerIndex, layerIndex - 1),
+    circles: swapBeamLayers(grid.circles, layerIndex, layerIndex - 1),
+  };
 }
 
 /** Replaces the active layer's cells wholesale (e.g. from an auto-fill generator). */

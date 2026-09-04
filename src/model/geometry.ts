@@ -1,9 +1,13 @@
 import * as THREE from "three";
+import { buildAngledBeamGeometry, buildBeamJoinBlend } from "./angledBeamGeometry";
+import { beamEndsMeetingBeams } from "./angledBeam";
+import { buildSlotDiscGeometry } from "./slotDiscGeometry";
 import { buildBallPinGeometry } from "./ballPin";
-import { buildCircleSolidGeometry } from "./circleSolidGeometry";
+import { buildCircleSolidGeometry, CIRCLE_CUT_OVERHANG, CIRCLE_SEGMENTS } from "./circleSolidGeometry";
 import { AXIS_AWARE_TYPES, BLEND_AWARE_TYPES, BODY_REPLACING_TYPES, CellType, HOLE_TYPES, HoleAxis, PlateFraction } from "./cellTypes";
-import { intersect, subtract, unionAll } from "./csg";
-import { Cell, GridState, inBounds, indexOf, Layer } from "./grid";
+import { intersect, intersectCylinderZ, subtract, subtractCylinderZ, unionAll } from "./csg";
+import { CircleRing, ringColRow } from "./circleRing";
+import { Cell, GridState, circleRingOf, inBounds, indexOf, Layer } from "./grid";
 import { buildPinGeometry } from "./pin";
 import {
   axleHoleGeometry,
@@ -50,7 +54,7 @@ const FULL_HEIGHT_PLATES = 3;
 
 /** The fixed-height plate fractions' own mm value, or undefined for "minimal" (which has no fixed
  * value — it's computed relative to whatever the rest of its layer resolves to; see `plateHeight`). */
-function fixedPlateHeight(fraction: PlateFraction | undefined): number | undefined {
+export function fixedPlateHeight(fraction: PlateFraction | undefined): number | undefined {
   switch (fraction) {
     case "module":
       return TECHNIC_MODULE_HEIGHT;
@@ -88,11 +92,22 @@ function plateHeight(fraction: PlateFraction | undefined, referenceHeight: numbe
  * for its summary line without duplicating this logic.
  */
 export function computeLayerHeights(grid: GridState): number[] {
-  return grid.layers.map((layer) => {
+  return grid.layers.map((layer, li) => {
+    // An angled beam occupies its layer exactly as a cell does, so it counts toward that layer's
+    // height too — otherwise a layer holding only beams would fall back to a default height that
+    // has nothing to do with the beams actually in it, and every layer above would sit at the
+    // wrong Z.
+    const beams = (grid.beams ?? []).filter((b) => b.layer === li && b.holes >= 1);
+    const discs = (grid.discs ?? []).filter((d) => d.layer === li);
+
     let reference = 0;
     for (const cell of layer) {
       if (cell.type === CellType.Empty) continue;
       const fixed = fixedPlateHeight(cell.plateFraction);
+      if (fixed !== undefined) reference = Math.max(reference, fixed);
+    }
+    for (const item of [...beams, ...discs]) {
+      const fixed = fixedPlateHeight(item.plateFraction ?? "module");
       if (fixed !== undefined) reference = Math.max(reference, fixed);
     }
     if (reference === 0) reference = PLATE_HEIGHT * FULL_HEIGHT_PLATES;
@@ -102,26 +117,33 @@ export function computeLayerHeights(grid: GridState): number[] {
       if (cell.type === CellType.Empty) continue;
       maxHeight = Math.max(maxHeight, plateHeight(cell.plateFraction, reference));
     }
+    for (const item of [...beams, ...discs]) {
+      maxHeight = Math.max(maxHeight, plateHeight(item.plateFraction ?? "module", reference));
+    }
     return maxHeight || PLATE_HEIGHT * FULL_HEIGHT_PLATES;
   });
 }
 
 /**
- * True when a Solid cell at (cx, cy) shares its (dx, dy) edge with a hollowed CircleSolid
- * neighbour AND that neighbour's own ring material has been bored away right at that shared
- * edge — i.e. the two cells would NOT actually touch once the neighbour's hollow cut is applied,
- * even though they're adjacent in the grid. This happens whenever a Solid cell is painted near
- * the centre of a ring/washer group: the neighbour ring cell keeps material only outside its own
- * inner hollow radius (see buildCircleSolidGeometry's own `hollow` cut), so a Solid cell sitting
- * close to the group's centre can end up facing empty air along part or all of that edge instead
- * of the neighbour's wall.
+ * True when a cell at (cx, cy) shares its (dx, dy) edge with a CircleSolid neighbour whose own ring
+ * material has been cut away right at that shared edge — i.e. the two would NOT actually touch once
+ * the neighbour's circle cuts are applied, even though the grid says they're adjacent.
  *
- * Tests the CLOSEST point of the shared edge segment to the ring group's own centre, not just the
- * neighbour cell's centre — a corner of the shared edge can dip inside the hollow radius even
- * when the neighbour cell's own centre point stays outside it (a ring cell near the group's own
- * diagonal is exactly this case), so checking only the cell centre would miss a real gap.
+ * BOTH of the ring's cuts can do it, and a cell can be left facing air by either:
+ *
+ *  - the hollow BORE, when the cell sits near the group's centre: the ring keeps material only
+ *    outside its inner radius, so a cell close to the middle faces the void.
+ *  - the OUTER ARC, when the cell butts into the ring's rim from outside and the ring is round:
+ *    the ring keeps material only INSIDE its outer radius, so between the arc and the cell's square
+ *    edge there is nothing. An arm running into a round-outer ring meets exactly this — the grid
+ *    calls the ring cell occupied, so the join looks made, and the material stops short of it.
+ *
+ * Tests the shared edge SEGMENT rather than the neighbour cell's centre: the closest point of it to
+ * the group centre against the bore, the farthest against the arc. A corner of the edge can cross
+ * either radius while the cell's own centre stays clear — a ring cell near the group's diagonal is
+ * exactly that case — so checking only the centre point misses real gaps.
  */
-function hollowCircleGap(
+function circleCellGap(
   grid: GridState,
   layer: Layer,
   nx: number,
@@ -133,39 +155,44 @@ function hollowCircleGap(
 ): boolean {
   if (!inBounds(grid, nx, ny)) return false;
   const neighbor = layer[indexOf(grid, nx, ny)];
-  if (neighbor.type !== CellType.CircleSolid || !neighbor.circleHollow) return false;
+  const ring = circleRingOf(grid, neighbor);
+  if (!ring) return false;
 
-  const dimension = neighbor.circleDimension ?? 2;
-  const col = neighbor.circleCol ?? 0;
-  const row = neighbor.circleRow ?? 0;
+  const { dimension } = ring;
+  const slice = ringColRow(ring, nx, ny);
+  if (!slice) return false;
   const centerIndex = (dimension - 1) / 2;
   const neighborCx = (nx - (grid.width - 1) / 2) * STUD_PITCH;
   const neighborCy = (ny - (grid.height - 1) / 2) * STUD_PITCH;
-  const groupCenterX = neighborCx - (col - centerIndex) * STUD_PITCH;
-  const groupCenterY = neighborCy - (centerIndex - row) * STUD_PITCH;
-  // Small inward safety margin (well past RADIUS_EPSILON's own tiny nudge) so only a genuine,
-  // visually meaningful gap triggers a bridge — not a hairline sliver that's already connected.
-  const innerRadius = Math.max(0, ((dimension - 1) / 2) * STUD_PITCH - 0.5);
+  const groupCenterX = neighborCx - (slice.col - centerIndex) * STUD_PITCH;
+  const groupCenterY = neighborCy - (centerIndex - slice.row) * STUD_PITCH;
+  // Small safety margins (well past RADIUS_EPSILON's own tiny nudge) so only a genuine, visually
+  // meaningful gap triggers a bridge — not a hairline sliver that's already connected.
+  const innerRadius = ring.hollow ? Math.max(0, ((dimension - 1) / 2) * STUD_PITCH - 0.5) : 0;
+  const outerRadius = ring.outerSquare ? Infinity : (dimension / 2) * STUD_PITCH + 0.5;
 
   const half = STUD_PITCH / 2;
   const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  const at = (px: number, py: number) => Math.hypot(px - groupCenterX, py - groupCenterY);
   let closestDist: number;
+  let farthestDist: number;
   if (dx !== 0) {
     const edgeX = cx + dx * half;
-    const closestY = clamp(groupCenterY, cy - half, cy + half);
-    closestDist = Math.hypot(edgeX - groupCenterX, closestY - groupCenterY);
+    closestDist = at(edgeX, clamp(groupCenterY, cy - half, cy + half));
+    farthestDist = Math.max(at(edgeX, cy - half), at(edgeX, cy + half));
   } else {
     const edgeY = cy + dy * half;
-    const closestX = clamp(groupCenterX, cx - half, cx + half);
-    closestDist = Math.hypot(closestX - groupCenterX, edgeY - groupCenterY);
+    closestDist = at(clamp(groupCenterX, cx - half, cx + half), edgeY);
+    farthestDist = Math.max(at(cx - half, edgeY), at(cx + half, edgeY));
   }
-  return closestDist < innerRadius;
+  // Inside the bore, or outside the arc: either way the ring has no material at this face.
+  return closestDist < innerRadius || farthestDist > outerRadius;
 }
 
 /**
  * Walks outward from a cell along (dx, dy), one grid step at a time, collecting a translated
- * clone of `box` for every consecutive hollowed CircleSolid ring cell whose shared edge with the
- * previous step is still inside the ring's own hollow radius (see hollowCircleGap) — i.e. every
+ * clone of `box` for every consecutive CircleSolid ring cell whose shared edge with the previous
+ * step still has no ring material behind it (see circleCellGap) — i.e. every
  * cell along the way that would otherwise face empty air instead of real material. Stops as soon
  * as it reaches a step that ISN'T a gapped ring cell: either genuine ring wall material (outside
  * the hollow radius, where the two pieces already touch on their own) or a non-ring/non-adjacent
@@ -177,35 +204,112 @@ function hollowCircleGap(
  * short of ever reaching real ring wall. Walking cell-by-cell until the gap genuinely ends is what
  * makes the join actually land on solid material rather than stopping partway across the bore.
  */
-function collectJoinBridges(
+/**
+ * True when a ring cell's own square holds any of the ring's material at all — its band crosses the
+ * square somewhere.
+ *
+ * This is what ENDS a bridge walk. The gap test either side of it looks at the shared EDGE, and on a
+ * ring whose band is narrower than a cell (a 13x13 ring's is 4mm against an 8mm cell) no edge need
+ * ever land inside the band: each one is either outside the arc or inside the bore. Walking on "the
+ * edge has no material" alone therefore chains straight through — out of the arc, into the bore, and
+ * on across the hole to the far wall, which is a bar through the middle of the ring rather than a
+ * join to it.
+ *
+ * Filling a cell that HOLDS material already overlaps that material, so the two are one solid and
+ * the walk is done: stop there whatever the far edge says.
+ */
+function ringCellHasMaterial(grid: GridState, layer: Layer, nx: number, ny: number): boolean {
+  if (!inBounds(grid, nx, ny)) return false;
+  const cell = layer[indexOf(grid, nx, ny)];
+  const ring = circleRingOf(grid, cell);
+  if (!ring) return false;
+  const slice = ringColRow(ring, nx, ny);
+  if (!slice) return false;
+  const { dimension } = ring;
+  const centerIndex = (dimension - 1) / 2;
+  const cellCx = (nx - (grid.width - 1) / 2) * STUD_PITCH;
+  const cellCy = (ny - (grid.height - 1) / 2) * STUD_PITCH;
+  const groupCenterX = cellCx - (slice.col - centerIndex) * STUD_PITCH;
+  const groupCenterY = cellCy - (centerIndex - slice.row) * STUD_PITCH;
+  const half = STUD_PITCH / 2;
+  const dxAbs = Math.abs(cellCx - groupCenterX);
+  const dyAbs = Math.abs(cellCy - groupCenterY);
+  const near = Math.hypot(Math.max(0, dxAbs - half), Math.max(0, dyAbs - half));
+  const far = Math.hypot(dxAbs + half, dyAbs + half);
+  const innerRadius = ring.hollow ? ((dimension - 1) / 2) * STUD_PITCH : 0;
+  const outerRadius = ring.outerSquare ? Infinity : (dimension / 2) * STUD_PITCH;
+  return near < outerRadius && far > innerRadius;
+}
+
+async function collectJoinBridges(
   grid: GridState,
   layer: Layer,
   x: number,
   y: number,
   cx: number,
   cy: number,
+  cz: number,
+  height: number,
   dx: number,
   dy: number,
   box: THREE.BufferGeometry,
-): THREE.BufferGeometry[] {
+): Promise<THREE.BufferGeometry[]> {
   const bridges: THREE.BufferGeometry[] = [];
+  /** The ring being bridged to, taken from the first gapped cell — they are all the same ring. */
+  let bridged: CircleRing | null = null;
   let stepCx = cx;
   let stepCy = cy;
   let nx = x + dx;
   let ny = y + dy;
   let steps = 0;
   const maxSteps = grid.width + grid.height;
-  while (steps < maxSteps && hollowCircleGap(grid, layer, nx, ny, stepCx, stepCy, dx, dy)) {
+  while (steps < maxSteps && circleCellGap(grid, layer, nx, ny, stepCx, stepCy, dx, dy)) {
+    bridged = bridged ?? circleRingOf(grid, layer[indexOf(grid, nx, ny)]);
     const bridge = box.clone();
     bridge.translate((nx - x) * STUD_PITCH, (ny - y) * STUD_PITCH, 0);
     bridges.push(bridge);
+    // Reached the wall: this bridge overlaps real ring material, so the join is made and going on
+    // would only push a bar deeper into the ring.
+    if (ringCellHasMaterial(grid, layer, nx, ny)) break;
     stepCx += dx * STUD_PITCH;
     stepCy += dy * STUD_PITCH;
     nx += dx;
     ny += dy;
     steps++;
   }
-  return bridges;
+  if (bridges.length === 0 || !bridged) return bridges;
+
+  // A bridge fills whole CELLS, and a cell at the rim straddles the ring's wall: filling its square
+  // reaches past the wall and into the void on the far side — 2.5mm into the bore on a 13x13 ring,
+  // which reads as the join spilling into the hole. So each bridge is clipped to the void it
+  // started in: it may cross the gap up to the ring's material, never through it and out the other
+  // side.
+  const slice = ringColRow(bridged, x + dx, y + dy);
+  if (!slice) return bridges;
+  const { dimension } = bridged;
+  const centerIndex = (dimension - 1) / 2;
+  const firstCx = (x + dx - (grid.width - 1) / 2) * STUD_PITCH;
+  const firstCy = (y + dy - (grid.height - 1) / 2) * STUD_PITCH;
+  const groupCenterX = firstCx - (slice.col - centerIndex) * STUD_PITCH;
+  const groupCenterY = firstCy - (centerIndex - slice.row) * STUD_PITCH;
+  const innerRadius = bridged.hollow ? ((dimension - 1) / 2) * STUD_PITCH : 0;
+  const outerRadius = bridged.outerSquare ? Infinity : (dimension / 2) * STUD_PITCH;
+  // Which void the SOURCE cell sits in decides which way the clip runs.
+  const sourceR = Math.hypot(cx - groupCenterX, cy - groupCenterY);
+  const tall = height + CIRCLE_CUT_OVERHANG * 2;
+  const clipped: THREE.BufferGeometry[] = [];
+  for (const bridge of bridges) {
+    let piece = bridge;
+    if (sourceR > outerRadius && innerRadius > 0) {
+      // Came from outside the rim: keep it out of the bore.
+      piece = await subtractCylinderZ(piece, innerRadius, tall, groupCenterX, groupCenterY, cz, CIRCLE_SEGMENTS);
+    } else if (sourceR < innerRadius && Number.isFinite(outerRadius)) {
+      // Came from inside the bore: keep it inside the rim.
+      piece = await intersectCylinderZ(piece, outerRadius, tall, groupCenterX, groupCenterY, cz, CIRCLE_SEGMENTS);
+    }
+    if ((piece.attributes.position?.count ?? 0) > 0) clipped.push(piece);
+  }
+  return clipped;
 }
 
 /**
@@ -321,6 +425,86 @@ function cellExteriorFaces(
     zMin: isBottomLayer,
     zMax: isTopLayer,
   };
+}
+
+/**
+ * Cutters that chamfer a cell's genuinely EXTERIOR edges by `chamfer` mm — a 45° flat where two
+ * exterior faces meet.
+ *
+ * Only exterior edges, for the same reason `rounded` only rounds exterior corners: an edge shared
+ * with a neighbouring occupied cell isn't an edge of the finished part at all, and cutting it would
+ * open a groove down the middle of a joint that's supposed to be solid.
+ *
+ * Each cutter is a box turned 45° about the edge it's cutting, positioned so its near face lies on
+ * the chamfer plane — the plane through the two points the corner is pulled back to. `SPAN` just
+ * has to be comfortably bigger than the chamfer so the cutter reaches past the material.
+ */
+function chamferCutters(
+  cx: number,
+  cy: number,
+  cz: number,
+  sizeX: number,
+  sizeY: number,
+  sizeZ: number,
+  chamfer: number,
+  ext: ExteriorFaces,
+): THREE.BufferGeometry[] {
+  const SPAN = chamfer * 6 + 4;
+  const hx = sizeX / 2;
+  const hy = sizeY / 2;
+  const hz = sizeZ / 2;
+  const cutters: THREE.BufferGeometry[] = [];
+
+  // Distance from the edge's own corner line out to the rotated cutter's centre, such that its
+  // near face passes through the chamfer plane.
+  const offset = (a: number, b: number) => (a + b - chamfer) / Math.SQRT2 + SPAN / 2;
+
+  // The four vertical edges — the ones that matter for a block dropping into a square pocket.
+  for (const [sx, sy, xFace, yFace] of [
+    [1, 1, ext.xMax, ext.yMax],
+    [1, -1, ext.xMax, ext.yMin],
+    [-1, 1, ext.xMin, ext.yMax],
+    [-1, -1, ext.xMin, ext.yMin],
+  ] as const) {
+    if (!xFace || !yFace) continue;
+    const cutter = new THREE.BoxGeometry(SPAN, SPAN, sizeZ + SPAN);
+    cutter.rotateZ(Math.PI / 4);
+    const d = offset(hx, hy) / Math.SQRT2; // back onto the X/Y axes from the diagonal
+    cutter.translate(cx + sx * d, cy + sy * d, cz);
+    cutters.push(cutter);
+  }
+
+  // The horizontal edges, top and bottom — the leading edge as a block enters a pocket.
+  for (const [sz, zFace] of [
+    [1, ext.zMax],
+    [-1, ext.zMin],
+  ] as const) {
+    if (!zFace) continue;
+    for (const [sx, xFace] of [
+      [1, ext.xMax],
+      [-1, ext.xMin],
+    ] as const) {
+      if (!xFace) continue;
+      const cutter = new THREE.BoxGeometry(SPAN, sizeY + SPAN, SPAN);
+      cutter.rotateY(Math.PI / 4);
+      const d = offset(hx, hz) / Math.SQRT2;
+      cutter.translate(cx + sx * d, cy, cz + sz * d);
+      cutters.push(cutter);
+    }
+    for (const [sy, yFace] of [
+      [1, ext.yMax],
+      [-1, ext.yMin],
+    ] as const) {
+      if (!yFace) continue;
+      const cutter = new THREE.BoxGeometry(sizeX + SPAN, SPAN, SPAN);
+      cutter.rotateX(Math.PI / 4);
+      const d = offset(hy, hz) / Math.SQRT2;
+      cutter.translate(cx, cy + sy * d, cz + sz * d);
+      cutters.push(cutter);
+    }
+  }
+
+  return cutters;
 }
 
 /**
@@ -530,6 +714,17 @@ export async function buildGridGeometry(
   }
 
   const bodyParts: THREE.BufferGeometry[] = [];
+
+  // Cutters held back until the whole body has been unioned, then subtracted from the ASSEMBLED
+  // solid. Everything in this part is built as its own overlapping piece and fused with one union,
+  // so anything cut into a single piece beforehand is simply filled back in by whatever else is
+  // unioned over the same space afterwards. That's fine for features nothing overlaps, but not for
+  // a hole: a slot disc's body (or an angled beam's, or a neighbour's join bridge) is built AFTER
+  // every cell and lands on top of the very cells its footprint covers, plugging their bores. Every
+  // cutter in here therefore gets one guaranteed pass over the finished solid, so a hole stays a
+  // hole no matter what shares its space. Contributors: each cell's own bore (see HOLE_TYPES
+  // below), a beam's vertical bores, and a disc's centre bore and pockets.
+  const assemblyCutters: THREE.BufferGeometry[] = [];
 
   for (let li = 0; li < grid.layers.length; li++) {
     if (hiddenLayers?.has(li)) continue;
@@ -785,11 +980,48 @@ export async function buildGridGeometry(
           }
         }
 
+        // After any rounding, and before the hole: same ordering argument as rounding itself — the
+        // exterior profile is shaped while the box is still simple, so the boolean stays
+        // well-conditioned and the hole is cut into a finished outer shape.
+        if (cell.chamferMm && cell.chamferMm > 0) {
+          const ext = cellExteriorFaces(layer, grid.width, grid.height, x, y, li === 0, li === grid.layers.length - 1);
+          // Measured off the box's OWN bounds rather than the nominal stud pitch. The box is built
+          // slightly over-size so neighbours genuinely overlap (CELL_OVERLAP), and smaller again
+          // when partClearance is set — so a chamfer positioned from the nominal size cuts the
+          // wrong amount off the face that actually exists. On a part whose whole job is to fit
+          // something else, a tenth of a millimetre of "roughly" is not good enough.
+          box.computeBoundingBox();
+          const bb = box.boundingBox!;
+          const sizeX = bb.max.x - bb.min.x;
+          const sizeY = bb.max.y - bb.min.y;
+          const sizeZ = bb.max.z - bb.min.z;
+          // Clamped under half the smallest dimension — two chamfers that meet would consume the
+          // face between them entirely.
+          const chamfer = Math.min(cell.chamferMm, Math.min(sizeX, sizeY, sizeZ) * 0.45);
+          const cutters = chamferCutters(
+            (bb.min.x + bb.max.x) / 2,
+            (bb.min.y + bb.max.y) / 2,
+            (bb.min.z + bb.max.z) / 2,
+            sizeX,
+            sizeY,
+            sizeZ,
+            chamfer,
+            ext,
+          );
+          if (cutters.length > 0) {
+            box = await subtract(box, cutters.length === 1 ? cutters[0] : await unionAll(cutters));
+          }
+        }
+
         let bodyPiece: THREE.BufferGeometry;
-        if (cell.type === CellType.CircleSolid) {
-          const dimension = cell.circleDimension ?? 2;
-          const col = cell.circleCol ?? 0;
-          const row = cell.circleRow ?? 0;
+        const ring = circleRingOf(grid, cell);
+        const slice = ring ? ringColRow(ring, x, y) : null;
+        // A CircleSolid with no ring behind it — one whose ring is gone, or a cell dragged out of
+        // its ring's footprint — still has to build SOMETHING, and falling through to the plain
+        // body branch makes it a Solid, which is exactly what a circle cell with no circle is.
+        if (ring && slice) {
+          const { dimension } = ring;
+          const { col, row } = slice;
           // `box` here is this cell's own body as already built above — full stud width by
           // default, or already narrowed to a slit if widthFraction/axis is set, and already
           // rounded if cell.rounded — so a CircleSolid cell now supports the same narrowing (and
@@ -803,8 +1035,8 @@ export async function buildGridGeometry(
             dimension,
             col,
             row,
-            cell.circleHollow ?? false,
-            cell.circleOuterSquare ?? false,
+            ring.hollow,
+            ring.outerSquare,
           );
         } else if (HOLE_TYPES.has(cell.type)) {
           const axis = cell.axis ?? "x";
@@ -823,6 +1055,19 @@ export async function buildGridGeometry(
           holeGeomClone.translate(bx, by, cz);
 
           bodyPiece = await subtract(box, holeGeomClone);
+
+          // The same bore, kept for one more pass over the finished assembly — see
+          // assemblyCutters. Cutting it here as well isn't redundant: a slot disc or angled beam
+          // covering this cell is unioned on AFTER every cell is built, so without the second pass
+          // its body plugs this bore straight back up and the hole vanishes (a hole cell painted
+          // inside a disc's footprint came out as blank slab). Safe to apply to the whole solid
+          // rather than just this cell, because the cutter never leaves the cell's own volume: a
+          // z bore is exactly `cellHeight` tall and stays inside this layer, and an x/y bore runs
+          // exactly `axisSpan` (a stud at most) and stays inside this footprint. So it can only
+          // ever clear material that had encroached on this cell's own space — which is precisely
+          // what needs clearing, including the sliver a neighbour's CELL_OVERLAP pushes across the
+          // shared face into the bore's mouth.
+          assemblyCutters.push(holeGeomClone.clone());
 
           if (cell.type === CellType.BallJoint) {
             const forkKeeper = (await ballSocketForkKeeperGeometry(boreLength, axis, flip)).clone();
@@ -878,10 +1123,10 @@ export async function buildGridGeometry(
           bodyParts.push(bodyPiece);
         }
 
-        // A Solid/TechnicHole/etc cell painted near the centre of a hollow ring/washer group can
-        // end up facing empty air along an edge the grid says is "adjacent" — see
-        // hollowCircleGap's own doc. Bridge that gap by also filling every gapped cell's own
-        // footprint out to wherever the ring's hollow radius actually ends (see
+        // A Solid/TechnicHole/etc cell next to a circle ring can end up facing empty air along an
+        // edge the grid says is "adjacent" — inside the bore, or outside a round rim; see
+        // circleCellGap's own doc. Bridge that gap by also filling every gapped cell's own
+        // footprint out to wherever the ring's material actually starts (see
         // collectJoinBridges), at THIS cell's height (deliberately allowed to be shorter than the
         // ring's), so the union below reconnects with the ring's surviving wall material instead
         // of leaving this cell floating disconnected inside the bore.
@@ -902,7 +1147,7 @@ export async function buildGridGeometry(
             // full-stud box, so a narrowed rib bridges the gap with its own true (narrower)
             // cross-section instead of ballooning out to full stud width where it crosses into
             // the neighbour's cell.
-            bodyParts.push(...collectJoinBridges(grid, layer, x, y, cx, cy, dx, dy, box));
+            bodyParts.push(...(await collectJoinBridges(grid, layer, x, y, cx, cy, cz, cellHeight, dx, dy, box)));
           }
         }
 
@@ -996,6 +1241,86 @@ export async function buildGridGeometry(
     }
   }
 
+  // Angled beams (see AngledBeam) live alongside the cell grid rather than inside it, so they're
+  // built after every cell — same layer bases, same world space, unioned into the same solid, so a
+  // beam anchored on a painted cell fuses with it exactly as two adjacent cells would. A beam's own
+  // height/width use the same PlateFraction scale a cell's do, resolved against its layer for
+  // "minimal" just like `plateHeight` does for a cell.
+  // A beam's VERTICAL hole cutters are held back until the whole body is unioned — see
+  // buildAngledBeamGeometry's own note: cut them into the beam alone and any solid cell the beam
+  // passes through simply fills them back in when it's unioned on afterwards. (In-plane bores are
+  // cut there and don't appear here — same note explains why.)
+  // Each beam's built width, worked out once: a beam's blend needs the OTHER beams' outlines as
+  // well as the cells', and an outline is only useful if it is the width that beam is really built
+  // at.
+  const beamWidths = new Map<string, number>();
+  for (const beam of grid.beams ?? []) {
+    beamWidths.set(beam.id, Math.min(STUD_PITCH, fixedPlateHeight(beam.widthFraction) ?? STUD_PITCH));
+  }
+
+  for (const beam of grid.beams ?? []) {
+    if (beam.layer < 0 || beam.layer >= grid.layers.length) continue;
+    if (hiddenLayers?.has(beam.layer)) continue;
+    if (beam.holes < 1) continue;
+    const layerHeight = layerHeights[beam.layer];
+    const beamHeight = plateHeight(beam.plateFraction ?? "module", layerHeight);
+    // Clamped to a stud for the same reason a cell's own axisSpan is: the PlateFraction scale runs
+    // past 8mm, which is fine as a height but as a WIDTH would make the beam wider than the hole
+    // pattern it carries.
+    const beamWidth = Math.min(STUD_PITCH, fixedPlateHeight(beam.widthFraction) ?? STUD_PITCH);
+    const built = await buildAngledBeamGeometry(
+      grid,
+      beam,
+      layerBases[beam.layer],
+      beamHeight,
+      beamWidth,
+      layerHeight,
+      beamEndsMeetingBeams(
+        beam,
+        (grid.beams ?? []).filter((b) => b.layer === beam.layer && !hiddenLayers?.has(b.layer)),
+      ),
+    );
+    bodyParts.push(built.body);
+    assemblyCutters.push(...built.throughCutters);
+
+    // The join blend is a 2D operation on the beam's outline and the blocks' (see footprintBlend),
+    // so it is computed here rather than inside the beam builder: the fill has to be unioned with
+    // the assembly and the carve subtracted from it, and neither is the beam's own solid alone.
+    const radius = beam.gusset ?? 0;
+    if (radius > 0) {
+      const others = (grid.beams ?? [])
+        .filter((b) => b.id !== beam.id && b.layer === beam.layer && !hiddenLayers?.has(b.layer))
+        .map((b) => ({ beam: b, width: beamWidths.get(b.id) ?? STUD_PITCH }));
+      const blend = await buildBeamJoinBlend(
+        grid,
+        beam,
+        layerBases[beam.layer],
+        beamHeight,
+        beamWidth,
+        radius,
+        others,
+      );
+      if (blend.fill) bodyParts.push(blend.fill);
+      if (blend.carve) assemblyCutters.push(blend.carve);
+    }
+  }
+
+  // Slot discs, same deal as beams: built after every cell, into the same world space and the same
+  // union, with their bore and pockets held back as cutters so a cell painted over the disc can't
+  // fill them in (see buildSlotDiscGeometry).
+  for (const disc of grid.discs ?? []) {
+    if (disc.layer < 0 || disc.layer >= grid.layers.length) continue;
+    if (hiddenLayers?.has(disc.layer)) continue;
+    if (disc.slots < 1) continue;
+    const layerHeight = layerHeights[disc.layer];
+    const discHeight = plateHeight(disc.plateFraction ?? "module", layerHeight);
+    const built = buildSlotDiscGeometry(grid, disc, layerBases[disc.layer], discHeight, layerHeight);
+    // The mouth ramps shape this disc and nothing else, so they are subtracted here rather than
+    // added to the assembly-wide cutters — see buildSlotDiscGeometry.
+    bodyParts.push(built.bodyCutters.length > 0 ? await subtract(built.body, await unionAll(built.bodyCutters)) : built.body);
+    assemblyCutters.push(...built.throughCutters);
+  }
+
   // If a corner cell has a hole/pin bore, the corner-rounding cut there must stay small enough
   // not to breach the thin wall between that bore's own boss circle (centred at the cell's
   // centre, STUD_PITCH/2 in from each edge) and the model's outer corner point. That distance is
@@ -1020,6 +1345,12 @@ export async function buildGridGeometry(
   if (bodyParts.length === 0) return new THREE.BufferGeometry();
 
   let geom = await unionAll(bodyParts);
+
+  // Bored out of the ASSEMBLED body, so a cell's own bore, a beam's holes and a disc's pockets all
+  // survive whatever they run through — and whatever was unioned over them.
+  if (assemblyCutters.length > 0) {
+    geom = await subtract(geom, assemblyCutters.length === 1 ? assemblyCutters[0] : await unionAll(assemblyCutters));
+  }
 
   if (grid.rounding.corners) {
     const widthMm = grid.width * STUD_PITCH;

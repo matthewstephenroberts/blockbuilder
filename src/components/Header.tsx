@@ -15,12 +15,20 @@ interface Props {
   onRedo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  /**
+   * Layers currently hidden from the 3D preview. Export leaves them out too — an assembly whose
+   * parts move against each other (a carousel and the gate plate under it, say) lives on separate
+   * layers of one project but has to reach the printer as separate STLs, and hiding a layer is
+   * already the control for "not this bit". Exporting the whole stack regardless just fused them.
+   */
+  hiddenLayers: ReadonlySet<number>;
 }
 
-export default function Header({ theme, onToggleTheme, grid, onSaveProject, onLoadProject, onClearProject, onError, onUndo, onRedo, canUndo, canRedo }: Props) {
+export default function Header({ theme, onToggleTheme, grid, onSaveProject, onLoadProject, onClearProject, onError, onUndo, onRedo, canUndo, canRedo, hiddenLayers }: Props) {
+  const hiddenCount = hiddenLayers.size;
   const handleExportSTL = async () => {
     try {
-      const geometry = await buildGridGeometry(grid);
+      const geometry = await buildGridGeometry(grid, hiddenLayers);
       await downloadGeometryAsSTL(geometry, "blockbuilder-part.stl");
     } catch (err) {
       console.error("Failed to export STL:", err);
@@ -71,7 +79,11 @@ export default function Header({ theme, onToggleTheme, grid, onSaveProject, onLo
         <button
           className="icon-btn ghost"
           onClick={handleExportSTL}
-          title="Export as STL"
+          title={
+            hiddenCount > 0
+              ? `Export as STL — ${hiddenCount} hidden layer${hiddenCount === 1 ? "" : "s"} left out. Hide a layer to export one part of an assembly on its own.`
+              : "Export as STL"
+          }
         >
           <Download size={18} />
         </button>

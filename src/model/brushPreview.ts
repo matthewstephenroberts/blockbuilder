@@ -1,5 +1,7 @@
 import * as THREE from "three";
-import { CellType } from "./cellTypes";
+import { createAngledBeam } from "./angledBeam";
+import { createSlotDisc } from "./slotDisc";
+import { BRUSH_ONLY_TYPES, CellType } from "./cellTypes";
 import { buildGridGeometry } from "./geometry";
 import { createEmptyGrid } from "./grid";
 import { getCellTypeHexColor } from "./colorMap";
@@ -37,15 +39,27 @@ export async function generateBrushPreview(type: CellType, width: number = 60, h
 
   // Create a minimal grid with single cell of the requested type
   try {
+    // A brush-only type (see BRUSH_ONLY_TYPES) has no cell to put in the grid — an angled beam is
+    // its own element, so its thumbnail is a short beam rather than a one-cell block. Kept to 3
+    // holes at 45° so the thing that makes it different (it runs diagonally, its holes are at its
+    // OWN pitch) is what reads at thumbnail size.
     const grid = createEmptyGrid(1, 1);
-    grid.layers[0][0] = {
-      type,
-      axis: "x",
-      flip: false,
-      plateFraction: "full",
-      widthFraction: undefined,
-      rounded: false,
-    };
+    if (type === CellType.SlotDisc) {
+      // Few slots and no clearance fuss — at 60px what has to read is "a disc with pockets round
+      // the edge and a bore in the middle", not the exact part.
+      grid.discs = [{ ...createSlotDisc(0, 0, 0), slots: 6 }];
+    } else if (BRUSH_ONLY_TYPES.has(type)) {
+      grid.beams = [{ ...createAngledBeam(0, 0, 0), holes: 3 }];
+    } else {
+      grid.layers[0][0] = {
+        type,
+        axis: "x",
+        flip: false,
+        plateFraction: "full",
+        widthFraction: undefined,
+        rounded: false,
+      };
+    }
 
     const geometry = await buildGridGeometry(grid);
 

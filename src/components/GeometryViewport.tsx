@@ -2,7 +2,7 @@ import { GizmoHelper, GizmoViewport, OrbitControls, Grid } from "@react-three/dr
 import { Canvas, useThree, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useRef, useState, useEffect } from "react";
-import { Home } from "lucide-react";
+import { ArrowUpFromLine, Home } from "lucide-react";
 
 interface Props {
   geometry: THREE.BufferGeometry;
@@ -33,14 +33,21 @@ function ViewportContent({
   geometry,
   color = "#4ea8ff",
   state,
+  isDarkTheme,
 }: {
   geometry: THREE.BufferGeometry;
   color?: string;
   state: InstanceState;
+  isDarkTheme: boolean;
 }) {
   const controlsRef = useRef<any>(null);
   const { camera } = useThree();
   const [homeAnimation, setHomeAnimation] = useState<any>(null);
+  // An empty project builds a bare BufferGeometry with no attributes at all (see
+  // buildGridGeometry's own early return). EdgesGeometry reads `attributes.position.count`
+  // unguarded and throws on it, which took the whole canvas down with it — a blank grid is the
+  // FIRST thing the app renders, so this has to be checked, not assumed.
+  const hasGeometry = (geometry.attributes?.position?.count ?? 0) > 0;
 
   // Store camera and controls for home button to use — scoped to THIS instance's own state object,
   // not shared across every GeometryViewport mounted on the page (see InstanceState doc above).
@@ -66,11 +73,64 @@ function ViewportContent({
 
   return (
     <>
-      <ambientLight intensity={0.6} />
-      <directionalLight position={[60, -80, 120]} intensity={1.1} castShadow />
+      {/*
+        Lit so that a face's ORIENTATION is what changes its brightness. The old setup was a strong
+        ambient plus one directional from high above, which lights a flat top face and a 45° ramp
+        beside it to within a few percent of each other — so a chamfer, whose entire visual signature
+        is a narrow band at 45°, disappeared into the face it was cut into. That made a correct
+        chamfer indistinguishable from a missing one by eye.
+
+        Ambient is dropped and replaced by a hemisphere light: sky colour from above, ground colour
+        from below, so a surface's tilt shifts its HUE as well as its brightness and a ramp reads
+        even where the contrast is low. The key light comes from a shallower angle for longer,
+        clearer gradients across a 45° face, and a dim fill from the opposite side keeps the
+        away-facing surfaces from going flat black.
+      */}
+      <hemisphereLight
+        args={[isDarkTheme ? "#9fc7ff" : "#ffffff", isDarkTheme ? "#141a24" : "#8d9099", 0.85]}
+      />
+      <ambientLight intensity={0.18} />
+      {/*
+        A CAST shadow and a HOLE look the same when the shadow goes black: both are a dark patch
+        with a hard edge sitting on a flat face. That's a real problem here, because this part
+        self-shadows heavily — a raised rim throws a sharp wedge across the disc inside it, and it
+        reads as a cut-out that isn't there.
+
+        So the shadow is deliberately weak (`shadow-intensity`) rather than opaque. A shadowed face
+        drops in brightness but keeps the part's own hue, while a genuine opening shows the dark
+        background through it — which makes the two tell-apart-able at a glance. The bigger map and
+        tightened bias keep the softened edge from acquiring its own artefacts.
+      */}
+      <directionalLight
+        position={[70, -90, 70]}
+        intensity={1.0}
+        castShadow
+        shadow-intensity={0.32}
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-bias={-0.0005}
+        shadow-normalBias={0.4}
+      />
+      <directionalLight position={[-80, 60, 30]} intensity={0.3} />
       <mesh geometry={geometry} castShadow receiveShadow>
-        <meshStandardMaterial color={color} roughness={0.45} metalness={0.05} />
+        {/* Explicit flat shading: the CSG output is already per-face (see csg.ts) but saying so
+            keeps every facet's own normal even if that ever changes. Rougher and non-metallic so
+            the difference between faces is the light's angle rather than a moving specular. */}
+        <meshStandardMaterial color={color} roughness={0.62} metalness={0} flatShading />
       </mesh>
+      {/* Feature edges over the top. This is what makes a chamfer unambiguous: a ramp is bounded by
+          two hard edges, so it reads as a distinct band whatever the lighting does. The 24° threshold keeps it to real edges — a 128-segment circle's own facets are far below it, so
+          curves don't turn into wireframe. */}
+      {hasGeometry && (
+        <lineSegments>
+          <edgesGeometry args={[geometry, 24]} />
+          <lineBasicMaterial
+            color={isDarkTheme ? "#0b1017" : "#1d2430"}
+            transparent
+            opacity={isDarkTheme ? 0.45 : 0.3}
+          />
+        </lineSegments>
+      )}
       <Grid
         args={[400, 400]}
         cellSize={8}
@@ -104,7 +164,15 @@ export default function GeometryViewport({ geometry, color = "#4ea8ff", cameraDi
     return () => observer.disconnect();
   }, []);
 
-  const handleHome = () => {
+  /**
+   * Frames the model from `direction` — a unit-ish vector scaled to the model's own size.
+   *
+   * `fromBelow` matters more than it sounds: anything cut into the part's UNDERSIDE (a slot disc's
+   * bottom mouth chamfer, most obviously) is invisible from every default view, so a setting that
+   * only affects the bottom face reads as doing nothing at all. Orbiting under the model by hand
+   * works but nobody thinks to try it.
+   */
+  const frameFrom = (direction: THREE.Vector3) => {
     if (!instanceState.camera || !instanceState.controls || !instanceState.startAnimation) return;
 
     const camera = instanceState.camera;
@@ -128,9 +196,9 @@ export default function GeometryViewport({ geometry, color = "#4ea8ff", cameraDi
     // Isometric angle positioned to match 2D cell editor view
     // Camera positioned from left-front-up to view the grid correctly
     const targetPos = new THREE.Vector3(
-      center.x - cameraZ * 0.67,
-      center.y - cameraZ * 0.67,
-      center.z + cameraZ * 0.75
+      center.x + cameraZ * direction.x,
+      center.y + cameraZ * direction.y,
+      center.z + cameraZ * direction.z
     );
     const targetLookAt = center;
 
@@ -143,6 +211,12 @@ export default function GeometryViewport({ geometry, color = "#4ea8ff", cameraDi
       duration: 500,
     });
   };
+
+  // The established isometric home view — see COORDINATE_SYSTEM.md, which pins these exact
+  // multipliers as the orientation the 2D plan is drawn to match.
+  const handleHome = () => frameFrom(new THREE.Vector3(-0.67, -0.67, 0.75));
+  // The same angle mirrored under the part, so the underside reads the same way round.
+  const handleUnderside = () => frameFrom(new THREE.Vector3(-0.67, -0.67, -0.75));
 
   // Expose home trigger function for external calls (e.g., from CatalogPanel) — only the main
   // viewport instance registers itself, so PinPanel's preview never hijacks the trigger.
@@ -161,7 +235,7 @@ export default function GeometryViewport({ geometry, color = "#4ea8ff", cameraDi
         className="viewport-canvas"
       >
         <color attach="background" args={[bgColorHex]} />
-        <ViewportContent geometry={geometry} color={color} state={instanceState} />
+        <ViewportContent geometry={geometry} color={color} state={instanceState} isDarkTheme={isDarkTheme} />
       </Canvas>
       <button
         onClick={handleHome}
@@ -169,6 +243,13 @@ export default function GeometryViewport({ geometry, color = "#4ea8ff", cameraDi
         title="Reset to isometric view"
       >
         <Home size={18} />
+      </button>
+      <button
+        onClick={handleUnderside}
+        className="viewport-home-btn viewport-underside-btn"
+        title="View from underneath — the only way to see anything cut into the part's bottom face, such as a slot disc's bottom mouth chamfer."
+      >
+        <ArrowUpFromLine size={18} />
       </button>
     </div>
   );

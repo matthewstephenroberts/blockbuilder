@@ -13,7 +13,28 @@ export enum CellType {
   Axle = "axle",
   AxlePiece = "axlePiece",
   PinPiece = "pinPiece",
+  /**
+   * BRUSH ONLY — never stored in a cell (see BRUSH_ONLY_TYPES). Painting with it places an
+   * AngledBeam anchored at the clicked cell instead of writing anything into the layer.
+   */
+  AngledBeam = "angledBeam",
+  /**
+   * BRUSH ONLY — never stored in a cell (see BRUSH_ONLY_TYPES). Painting with it places a
+   * SlotDisc centred on the clicked cell.
+   */
+  SlotDisc = "slotDisc",
 }
+
+/**
+ * Types that exist only as a BRUSH — selectable in the ActionBar, but never written into a
+ * `Cell.type`. An angled beam isn't made of cells at all (see model/angledBeam.ts on why its holes
+ * can't sit on grid centres); it's its own element on `GridState.beams`. Modelling its brush as a
+ * CellType anyway is what lets it share the one brush strip, icon, preview and colour every other
+ * paintable thing already has — the alternative was a second, parallel "what am I placing" concept
+ * for a single element, which is exactly the split this replaced. Anything that reads a cell's own
+ * type never sees these; `paintRect` intercepts them before the layer is touched.
+ */
+export const BRUSH_ONLY_TYPES: ReadonlySet<CellType> = new Set([CellType.AngledBeam, CellType.SlotDisc]);
 
 /**
  * World axis a hole bores through. "x"/"y" bore sideways through the beam's own walls (the usual
@@ -199,6 +220,20 @@ export interface CellTypeInfo {
 }
 
 export const CELL_TYPE_INFO: Record<CellType, CellTypeInfo> = {
+  [CellType.AngledBeam]: {
+    label: "Angled beam",
+    shortLabel: "⟋",
+    colour: "var(--lego-azure)",
+    description:
+      "A Technic beam running at an angle across the X/Y plane, with its holes at the real 8mm pitch along its own run — the one thing a 90° cell grid can't express. Click a cell to anchor the beam's first hole there; set its angle, hole count and hole type in the panel on the left, exactly like any other brush's settings.",
+  },
+  [CellType.SlotDisc]: {
+    label: "Slot disc",
+    shortLabel: "◉",
+    colour: "var(--lego-teal)",
+    description:
+      "A rotating carousel disc: an axle bore at the centre and a ring of square pockets sized to take 1x1 blocks, with the material between them forming the spokes. For a dispenser or feeder driven straight off a motor. Click a cell to centre the disc there; set the slot count, size and rim in the panel on the left.",
+  },
   [CellType.Empty]: {
     label: "Empty",
     shortLabel: "—",
@@ -313,5 +348,7 @@ export const CELL_TYPE_ORDER: CellType[] = [
   CellType.Axle,
   CellType.AxlePiece,
   CellType.PinPiece,
+  CellType.AngledBeam,
+  CellType.SlotDisc,
   CellType.Empty,
 ];

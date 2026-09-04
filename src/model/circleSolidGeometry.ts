@@ -1,8 +1,9 @@
 import * as THREE from "three";
 import { STUD_PITCH } from "./units";
-import { intersect, subtract } from "./csg";
+import { intersectCylinderZ, subtractCylinderZ } from "./csg";
 
-const OVERHANG = 2;
+/** How far a circle cut runs past the cell in Z, so it never ends coplanar with a face. */
+export const CIRCLE_CUT_OVERHANG = 2;
 
 // Segment count for the ring's own curve cylinders. The rest of the model deliberately keeps
 // FLAT per-facet shading (see csg.ts's own note on fromManifold: STL has no smoothing info, and
@@ -13,7 +14,7 @@ const OVERHANG = 2;
 // is watertight. Raising the segment count shrinks each facet instead of switching to smooth
 // shading, so the curve still reads as flat printed plastic, just with the facet seams small enough
 // not to catch the light as a false notch.
-const CIRCLE_SEGMENTS = 128;
+export const CIRCLE_SEGMENTS = 128;
 
 // A tiny outward nudge on the shared circle's radius. For several (dimension, col, row)
 // combinations — e.g. every cell in a 2x2 group — the circle's radius is constructed to reach
@@ -93,19 +94,24 @@ export async function buildCircleSolidGeometry(
     // 2x2 -> 1 stud (8mm), 3x3 -> 1.5 studs (12mm), 4x4 -> 2 studs (16mm), 5x5 -> 2.5 studs (20mm)
     const radiusMm = (dimension / 2) * STUD_PITCH + RADIUS_EPSILON;
 
-    // The shared circle, extruded along Z (matching the cell box's height axis) —
-    // CylinderGeometry's default bore runs along Y, so rotate 90° about X to bring its round face
-    // into the XY plane. Positioned in WORLD space, at the group's own centre, using this cell's
+    // The shared circle, positioned in WORLD space at the group's own centre, using this cell's
     // TRUE grid centre rather than wherever a narrowed `box` itself got shifted to, so the curve's
     // own position never moves just because one side got sliced off.
-    const cylinder = new THREE.CylinderGeometry(radiusMm, radiusMm, height + OVERHANG * 2, CIRCLE_SEGMENTS);
-    cylinder.rotateX(Math.PI / 2);
-    cylinder.translate(groupCenterX, groupCenterY, cz);
-
-    // Intersecting keeps only the part of this cell's (already positioned, possibly narrowed) box
-    // that's inside the shared circle — the manifold-safe direction (vs. subtracting the circle's
-    // complement) matching the rest of the codebase's rounding approach.
-    result = await intersect(box, cylinder);
+    //
+    // Cut by `intersectCylinderZ` rather than by a THREE.CylinderGeometry of our own: a mesh
+    // cylinder's closure seam leaves a hairline groove down the finished ring wherever it lands
+    // (see csg.ts's cylinderOp). Intersecting keeps only the part of this cell's box that's inside
+    // the shared circle — the manifold-safe direction (vs. subtracting the circle's complement),
+    // matching the rest of the codebase's rounding approach.
+    result = await intersectCylinderZ(
+      box,
+      radiusMm,
+      height + CIRCLE_CUT_OVERHANG * 2,
+      groupCenterX,
+      groupCenterY,
+      cz,
+      CIRCLE_SEGMENTS,
+    );
   }
 
   if (hollow) {
@@ -140,10 +146,15 @@ export async function buildCircleSolidGeometry(
         result = new THREE.BufferGeometry();
         result.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
       } else {
-        const innerCylinder = new THREE.CylinderGeometry(innerRadiusMm, innerRadiusMm, height + OVERHANG * 2, CIRCLE_SEGMENTS);
-        innerCylinder.rotateX(Math.PI / 2);
-        innerCylinder.translate(groupCenterX, groupCenterY, cz);
-        result = await subtract(result, innerCylinder);
+        result = await subtractCylinderZ(
+          result,
+          innerRadiusMm,
+          height + CIRCLE_CUT_OVERHANG * 2,
+          groupCenterX,
+          groupCenterY,
+          cz,
+          CIRCLE_SEGMENTS,
+        );
       }
     }
   }

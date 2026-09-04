@@ -82,16 +82,22 @@ body {
 
 .action-bar {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 12px;
   padding: 8px 24px;
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
   flex: 1;
   min-height: 70px;
-  max-height: 150px;
+  /* The wrapper's own inline height (dragged by the user, 70-180px) is the authority — a separate
+     max-height here just capped the bar below what the drag handle would set and clipped the
+     brushes. Scrolling belongs to .brush-group, which is the part that can overflow. */
+
+  /* One tile size every brush chip is built from. ActionBar overrides this on .brush-group with
+     the largest value at which every brush still fits without scrolling (see its own fitTiles);
+     this is only the value used for the very first paint, before that measurement has run. */
+  --brush-tile: 56px;
 }
 
 .tool-group {
@@ -102,11 +108,12 @@ body {
   align-items: center;
 }
 
-/* Stack tool buttons vertically on larger viewports */
-@media (min-height: 800px) {
-  .tool-group {
-    flex-direction: column;
-  }
+/* Stacked when the BAR is tall enough for two buttons — decided in ActionBar against the bar's own
+   measured height. This used to be a `@media (min-height: 800px)` viewport query, which stacked
+   them in any tall window even with the bar dragged down to its 70px minimum, where the second
+   button then had nowhere to go and was cut off. */
+.tool-group.stacked {
+  flex-direction: column;
 }
 
 .tool-group .icon-btn {
@@ -122,8 +129,12 @@ body {
 
 .brush-group {
   display: flex;
-  gap: clamp(4px, 1vw, 8px);
-  align-items: center;
+  gap: 6px;
+  /* flex-start, not center: with wrapping, `center` distributes the rows' spare height between
+     them, so a second row of brushes drifts down out of the bar instead of sitting under the
+     first. align-content does the same job for the block of rows as a whole. */
+  align-items: flex-start;
+  align-content: flex-start;
   flex: 1 1 auto;
   min-width: 0;
   flex-wrap: wrap;
@@ -157,19 +168,26 @@ body {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: clamp(3px, 2vw, 6px);
-  padding: clamp(3px, calc(var(--actionbar-height, 90px) * 0.08), 8px) clamp(6px, 1vw, 12px);
+  gap: 6px;
+  padding: 4px 8px;
   background: var(--panel-3);
   border: 1.5px solid var(--line);
   border-radius: 8px;
   cursor: pointer;
-  font-size: clamp(9px, calc(var(--actionbar-height, 90px) * 0.12), 13px);
+  font-size: clamp(9px, calc(var(--brush-tile) * 0.2), 13px);
   font-weight: 600;
   color: var(--text);
-  transition: all 0.15s;
-  flex: 1 1 auto;
-  min-width: 0;
-  height: calc(100% - 4px);
+  /* Deliberately NOT `transition: all` — that animated the chip's own height, so the auto-fit in
+     ActionBar measured a size that was still mid-animation and shrank against stale numbers
+     (it would settle on a two-row layout that visibly overflowed). Only the non-layout properties
+     animate; size changes land immediately, which is also what you want when the size is being
+     driven by a drag. */
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, filter 0.15s, transform 0.12s;
+  /* Sized by its contents, never stretched. `flex: 1 1 auto` made every chip grow to fill its row,
+     so a final row holding five brushes gave each of them a quarter of the screen with its icon
+     marooned in the middle, and no two rows agreed on a width. */
+  flex: 0 0 auto;
+  height: var(--brush-tile);
 }
 
 .brush-btn-with-preview:hover:not(:disabled) {
@@ -188,30 +206,30 @@ body {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: clamp(3px, 3vw, 6px);
+  gap: 5px;
   position: relative;
   flex-shrink: 0;
 }
 
 .brush-preview-swatch {
-  width: clamp(24px, calc(var(--actionbar-height, 90px) * 0.5), 120px);
-  height: clamp(24px, calc(var(--actionbar-height, 90px) * 0.5), 120px);
+  width: calc(var(--brush-tile) * 0.72);
+  height: calc(var(--brush-tile) * 0.72);
   border-radius: 4px;
   flex-shrink: 0;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .brush-preview-img {
-  width: clamp(24px, calc(var(--actionbar-height, 90px) * 0.5), 120px);
-  height: clamp(24px, calc(var(--actionbar-height, 90px) * 0.5), 120px);
+  width: calc(var(--brush-tile) * 0.72);
+  height: calc(var(--brush-tile) * 0.72);
   border-radius: 4px;
   flex-shrink: 0;
   object-fit: contain;
 }
 
 .brush-color-indicator {
-  width: clamp(3px, calc(var(--actionbar-height, 90px) * 0.08), 8px);
-  height: clamp(18px, calc(var(--actionbar-height, 90px) * 0.38), 48px);
+  width: clamp(3px, calc(var(--brush-tile) * 0.07), 6px);
+  height: calc(var(--brush-tile) * 0.52);
   border-radius: 2px;
   flex-shrink: 0;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(255, 255, 255, 0.1);
@@ -219,7 +237,7 @@ body {
 
 .brush-label {
   white-space: nowrap;
-  font-size: clamp(9px, 2vw, 12px);
+  font-size: clamp(9px, calc(var(--brush-tile) * 0.19), 12px);
   margin-top: 0;
   flex-shrink: 0;
 }
@@ -268,6 +286,11 @@ body {
   align-items: center;
   justify-content: center;
   transition: all 0.2s;
+}
+
+/* Sits directly under the home button — same control, different direction. */
+.viewport-underside-btn {
+  top: 60px;
 }
 
 .viewport-home-btn:hover {

@@ -4,6 +4,18 @@
 // 2.475/8 * 8 = 2.475mm).
 
 export const STUD_PITCH = 8;
+
+// A block's BODY is smaller than the pitch it sits on: an n-stud block measures
+// n * STUD_PITCH - BLOCK_BODY_UNDERSIZE across, so a row of them has a hairline between each pair
+// rather than binding. Sizing a pocket that a block has to drop into off the pitch instead of the
+// body silently spends that 0.2mm as if it were clearance, which it isn't — it's the gap that
+// makes two blocks side by side fit at all.
+export const BLOCK_BODY_UNDERSIZE = 0.2;
+
+/** The real across-the-flats size of an n-stud block body, in mm. */
+export function blockBodySizeMm(studs: number): number {
+  return studs * STUD_PITCH - BLOCK_BODY_UNDERSIZE;
+}
 export const PLATE_HEIGHT = 3.2;
 export const BRICK_HEIGHT = PLATE_HEIGHT * 3; // 9.6mm
 
@@ -158,4 +170,16 @@ export const CUT_EPSILON = 0.5;
 // invisible in the final part but keeps every merge/boolean well inside "actually overlapping"
 // territory.
 export const CELL_OVERLAP = 0.1;
+
+/**
+ * Half the across-the-flats size of a solid cell AS BUILT, in mm.
+ *
+ * Not `blockBodySizeMm(1) / 2`. That is the nominal body of a real block — 0.2mm under its stud, so
+ * a row of them has a hairline between each pair — but geometry.ts deliberately builds a cell
+ * `STUD_PITCH + CELL_OVERLAP` across instead, oversized so neighbours genuinely overlap and the CSG
+ * has thickness to work with. Anything that has to line up with a cell's real wall — a beam sat
+ * against a block, a blend that has to meet one — must use this, or it lands 0.15mm inside the
+ * surface that actually gets built and leaves a lip along the join.
+ */
+export const CELL_BUILT_HALF = (STUD_PITCH + CELL_OVERLAP) / 2;
 export const STUD_OVERLAP = 0.15;
