@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { ChevronUp, ChevronDown, Copy, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
+import { ChevronUp, ChevronDown, Copy, Download, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
 import { AXIS_AWARE_TYPES, CELL_TYPE_INFO, CellType, FLIP_AWARE_TYPES, plateFractionLabel, PLATE_FRACTION_INFO } from "../model/cellTypes";
 import {
   AngledBeam,
@@ -22,6 +22,9 @@ import {
   isBeamGridLegal,
   nearestBeamHole,
   normalizeDegrees,
+  beamSnapPatch,
+  beamRefCell,
+  beamRefOffsetStuds,
 } from "../model/angledBeam";
 import { centreForOrigin, CircleRing } from "../model/circleRing";
 import { Cell, getActiveLayer, GridState, inBounds, indexOf, Layer, layerPitch, layerSpacingOf, ResizeAnchor } from "../model/grid";
@@ -72,6 +75,8 @@ interface Props {
   onResize: (width: number, height: number, anchor?: ResizeAnchor) => void;
   hiddenLayers: ReadonlySet<number>;
   onToggleLayerVisibility: (index: number) => void;
+  /** Exports one layer on its own as an STL — the per-layer button in the layer strip. */
+  onExportLayer: (index: number) => void;
   selectedBeamId: string | null;
   onSelectBeam: (id: string | null) => void;
   selectedDiscId: string | null;
@@ -90,8 +95,10 @@ interface Props {
   /** Moves a ring so its centre lands on this square, carrying its member cells — the Alt-drag
    * gesture again. */
   onMoveCircleRing: (id: string, centreX: number, centreY: number) => void;
-  /** Moves a beam's anchor cell — the overlay's anchor dot is draggable. */
-  onMoveBeamAnchor: (id: string, anchorX: number, anchorY: number) => void;
+  /** Moves a beam so its lock point lands on a square — the overlay's move handle is draggable.
+   * A patch rather than an anchor because an exact ("middle hole") lock also spends the sub-cell
+   * remainder on the lead-ins and across-offset; see beamSnapPatch. */
+  onMoveBeamTo: (id: string, patch: Partial<AngledBeam>) => void;
   /** Called once when a move gesture starts, so the whole drag is one undo step (see the store's
    * own `checkpoint`) rather than one per intermediate position. */
   onBeginBeamDrag: () => void;
@@ -137,6 +144,7 @@ function LayerThumbnail({
   onMoveUp,
   onMoveDown,
   onToggleVisibility,
+  onExport,
 }: {
   layer: Layer;
   grid: GridState;
@@ -154,6 +162,8 @@ function LayerThumbnail({
   onMoveUp: () => void;
   onMoveDown: () => void;
   onToggleVisibility: () => void;
+  /** Export THIS layer on its own as an STL — see App's own handler for why it's per-layer. */
+  onExport: () => void;
 }) {
   return (
     <div className={`layer-thumb${active ? " active" : ""}`}>
@@ -204,6 +214,13 @@ function LayerThumbnail({
           }
         >
           {hidden ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+        <button
+          className="icon-btn sm"
+          onClick={onExport}
+          title="Export just this layer as an STL, dropped onto the build plate — the layer printed on its own, without the ones above and below it fused to it"
+        >
+          <Download size={14} />
         </button>
         <button
           className="icon-btn sm"
@@ -767,7 +784,7 @@ function BeamOverlay({
   beams,
   selectedBeamId,
   onSelectBeam,
-  onMoveBeamAnchor,
+  onMoveBeamTo,
   onBeginBeamDrag,
   interactive,
   ghost = false,
@@ -777,7 +794,7 @@ function BeamOverlay({
   beams: AngledBeam[];
   selectedBeamId: string | null;
   onSelectBeam: (id: string | null) => void;
-  onMoveBeamAnchor: (id: string, anchorX: number, anchorY: number) => void;
+  onMoveBeamTo: (id: string, patch: Partial<AngledBeam>) => void;
   onBeginBeamDrag: () => void;
   /** Only the Edit tool lets the overlay take clicks — while painting it has to stay transparent,
    * or a beam would shadow the squares underneath it and you couldn't paint through one. Alt-drag
@@ -794,13 +811,18 @@ function BeamOverlay({
     y: (grid.height - 1 - studY + 0.5) * cellPx,
   });
 
-  const dragTo = (e: React.PointerEvent<SVGElement>, id: string) => {
+  const dragTo = (e: React.PointerEvent<SVGElement>, beam: AngledBeam) => {
     const svg = e.currentTarget.ownerSVGElement;
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
     const x = Math.max(0, Math.min(grid.width - 1, Math.floor((e.clientX - rect.left) / cellPx)));
     const row = Math.max(0, Math.min(grid.height - 1, Math.floor((e.clientY - rect.top) / cellPx)));
-    onMoveBeamAnchor(id, x, grid.height - 1 - row);
+    // The cursor's square is where the LOCK POINT goes, not the anchor: the anchor is whatever
+    // puts that point there (see beamAnchorForRef).
+    onMoveBeamTo(
+      beam.id,
+      beamSnapPatch(beam, beam.moveRef ?? "start", x, grid.height - 1 - row, layerPitch(grid, beam.layer)),
+    );
   };
 
   return (
@@ -820,16 +842,24 @@ function BeamOverlay({
         // The beam's own across-shift (AngledBeam.acrossOffset), so the plan shows where the beam
         // actually is rather than where its anchor cell is.
         const across = (beam.acrossOffset ?? 0) / beamPitch;
-        const at = (studsAlong: number) =>
-          px(
-            beam.anchorX + dir.x * studsAlong - dir.y * across,
-            beam.anchorY + dir.y * studsAlong + dir.x * across,
-          );
+        // ...and its shift along the run (AngledBeam.alongOffset), which is how a hole is landed
+        // exactly on a cell centre — see beamSnapPatch.
+        const alongShift = (beam.alongOffset ?? 0) / beamPitch;
+        const at = (studsAlong0: number) =>
+          ((studsAlong) =>
+            px(
+              beam.anchorX + dir.x * studsAlong - dir.y * across,
+              beam.anchorY + dir.y * studsAlong + dir.x * across,
+            ))(studsAlong0 + alongShift);
         const start = at(body.from);
         const end = at(body.to);
         const legal = isBeamGridLegal(beam);
         const stroke = ghost ? GHOST_COLOUR : selected ? BEAM_OVERLAY_SELECTED_COLOUR : BEAM_OVERLAY_COLOUR;
         const holes = Array.from({ length: beam.holes }, (_, i) => at(beamHoleOffsetStuds(beam, i)));
+        // The move handle sits on whichever point the beam is currently held by, so the thing you
+        // grab is the thing that lands on the square you drop it on.
+        const handleOff = beamRefOffsetStuds(beam, beam.moveRef ?? "start", beamPitch);
+        const handle = px(beam.anchorX + handleOff.x, beam.anchorY + handleOff.y);
         const suppressed = new Set(beamSuppressedHoles(beam));
         const misses = new Map(beamEndHoleMisses(beam, beams).map((m) => [m.index, m.gap]));
         return (
@@ -916,8 +946,8 @@ function BeamOverlay({
               );
             })}
             <circle
-              cx={at(0).x}
-              cy={at(0).y}
+              cx={handle.x}
+              cy={handle.y}
               r={cellPx * 0.3}
               fill="none"
               stroke={stroke}
@@ -931,10 +961,16 @@ function BeamOverlay({
                 e.currentTarget.setPointerCapture(e.pointerId);
               }}
               onPointerMove={(e) => {
-                if (e.currentTarget.hasPointerCapture(e.pointerId)) dragTo(e, beam.id);
+                if (e.currentTarget.hasPointerCapture(e.pointerId)) dragTo(e, beam);
               }}
             >
-              <title>Anchor — drag to move this beam</title>
+              <title>
+                {(beam.moveRef ?? "start") === "centre"
+                  ? "Centre — drag to move this beam by its middle"
+                  : (beam.moveRef ?? "start") === "end"
+                    ? "Far end — drag to move this beam by its far end"
+                    : "Anchor — drag to move this beam"}
+              </title>
             </circle>
           </g>
         );
@@ -957,6 +993,7 @@ function LayerStrip({
   onSetLayerSpacing,
   hiddenLayers,
   onToggleLayerVisibility,
+  onExportLayer,
 }: {
   grid: GridState;
   onSelectLayer: (index: number) => void;
@@ -968,6 +1005,7 @@ function LayerStrip({
   onSetLayerSpacing: (index: number, patch: { pitch?: number; connectorPitch?: number }) => void;
   hiddenLayers: ReadonlySet<number>;
   onToggleLayerVisibility: (index: number) => void;
+  onExportLayer: (index: number) => void;
 }) {
   return (
     <div className="layer-strip-container">
@@ -995,6 +1033,7 @@ function LayerStrip({
               onMoveUp={() => onMoveLayerUp(layerIndex)}
               onMoveDown={() => onMoveLayerDown(layerIndex)}
               onToggleVisibility={() => onToggleLayerVisibility(layerIndex)}
+              onExport={() => onExportLayer(layerIndex)}
             />
           );
         })}
@@ -1194,6 +1233,7 @@ export default function GridEditor({
   onResize,
   hiddenLayers,
   onToggleLayerVisibility,
+  onExportLayer,
   selectedBeamId,
   onSelectBeam,
   selectedDiscId,
@@ -1205,7 +1245,7 @@ export default function GridEditor({
   onBeginCellDrag,
   onEndCellDrag,
   onMoveCircleRing,
-  onMoveBeamAnchor,
+  onMoveBeamTo,
   onBeginBeamDrag,
   onMoveCell,
   onMoveDiscCentre,
@@ -1257,7 +1297,15 @@ export default function GridEditor({
     (x: number, y: number) => {
       const disc = (grid.discs ?? []).find((d) => d.layer === grid.activeLayer && d.centreX === x && d.centreY === y);
       if (disc) return { kind: "disc" as const, id: disc.id };
-      const beam = (grid.beams ?? []).find((b) => b.layer === grid.activeLayer && b.anchorX === x && b.anchorY === y);
+      // Picked up by the square its LOCK POINT falls on (see BeamMoveRef) — the point the handle
+      // is drawn on — with the anchor still working as a fallback, so a beam held by its centre
+      // is never unreachable just because its middle sits over another beam's square.
+      const beams = (grid.beams ?? []).filter((b) => b.layer === grid.activeLayer);
+      const beam =
+        beams.find((b) => {
+          const cell = beamRefCell(b, b.moveRef ?? "start", layerPitch(grid, b.layer));
+          return cell.x === x && cell.y === y;
+        }) ?? beams.find((b) => b.anchorX === x && b.anchorY === y);
       if (beam) return { kind: "beam" as const, id: beam.id };
       // A ring is picked up by its centre cell — the square its handle sits on (or, for an even
       // dimension whose true centre is a cell CORNER, the square the handle sits at the corner
@@ -1333,7 +1381,10 @@ export default function GridEditor({
       const { x, y } = cellAt(e.clientX, e.clientY, e.currentTarget);
       if (!inBounds(grid, x, y)) return;
       if (move.kind === "beam") {
-        onMoveBeamAnchor(move.id, x, y);
+        const beam = (grid.beams ?? []).find((b) => b.id === move.id);
+        if (beam) {
+          onMoveBeamTo(move.id, beamSnapPatch(beam, beam.moveRef ?? "start", x, y, layerPitch(grid, beam.layer)));
+        }
       } else if (move.kind === "disc") {
         onMoveDiscCentre(move.id, x, y);
       } else if (move.kind === "circle") {
@@ -1433,6 +1484,7 @@ export default function GridEditor({
         onSetLayerSpacing={onSetLayerSpacing}
         hiddenLayers={hiddenLayers}
         onToggleLayerVisibility={onToggleLayerVisibility}
+        onExportLayer={onExportLayer}
       />
       <p className="muted sm">
         Editing layer {grid.activeLayer + 1} of {grid.layers.length}.{" "}
@@ -1545,7 +1597,7 @@ export default function GridEditor({
             beams={prevBeams}
             selectedBeamId={null}
             onSelectBeam={() => {}}
-            onMoveBeamAnchor={() => {}}
+            onMoveBeamTo={() => {}}
             onBeginBeamDrag={() => {}}
             interactive={false}
             ghost
@@ -1599,7 +1651,7 @@ export default function GridEditor({
           beams={(grid.beams ?? []).filter((b) => b.layer === grid.activeLayer)}
           selectedBeamId={selectedBeamId}
           onSelectBeam={onSelectBeam}
-          onMoveBeamAnchor={onMoveBeamAnchor}
+          onMoveBeamTo={onMoveBeamTo}
           onBeginBeamDrag={onBeginBeamDrag}
           interactive={tool === "edit"}
           cellPx={CELL_PX}

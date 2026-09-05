@@ -21,7 +21,7 @@ export default function ExportPanel({ grid, onError }: { grid: GridState; onErro
     setExporting(true);
     try {
       const geometry = await buildGridGeometry(grid);
-      await downloadGeometryAsSTL(geometry, "blockbuilder-part.stl");
+      await downloadGeometryAsSTL(geometry, "blockbuilder-part.stl", "part");
     } catch (err) {
       console.error("Failed to export STL:", err);
       onError(`Failed to export STL: ${err instanceof Error ? err.message : 'Unknown error'}`);

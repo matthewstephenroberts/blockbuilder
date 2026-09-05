@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
   AngledBeam,
@@ -18,6 +19,10 @@ import {
   isBeamGridLegal,
   nearestLegalHoleCounts,
   quadrantDegrees,
+  BeamMoveRef,
+  BEAM_MOVE_REFS,
+  beamLockHoleIndex,
+  BeamNeighbourFit,
 } from "../model/angledBeam";
 import {
   AXIS_SETTABLE_TYPES,
@@ -145,6 +150,16 @@ interface Props {
   onBeamGussetChange: (mm: number) => void;
   beamFit: BeamFitSetting;
   onBeamFitChange: (f: BeamFitSetting) => void;
+  /** Which point on a beam locks to the square under the cursor when it is moved. */
+  beamMoveRef: BeamMoveRef;
+  onBeamMoveRefChange: (r: BeamMoveRef) => void;
+  /** Picks which hole a "hole" lock holds the selected beam by. */
+  onBeamMoveHoleIndexChange: (index: number) => void;
+  onBeamAlongOffsetChange: (mm: number) => void;
+  /** Sits the beam against its nearest parallel neighbour; returns what it did, for the note below. */
+  onButtBeam: (id: string, fit: BeamNeighbourFit) => { movedMm: number; alongMismatchMm: number } | null;
+  /** Squares off (or re-rounds) one end of a beam — see AngledBeam.flatEnds. */
+  onBeamFlatEndChange: (id: string, end: "start" | "end", flat: boolean) => void;
   onRefitBeam: (id: string, mode: BeamFitSetting) => void;
   onClearBeamHoleAxes: () => void;
   discSettings: SlotDiscSettings;
@@ -548,6 +563,12 @@ export default function Toolbar({
   beamGusset,
   onBeamGussetChange,
   beamFit,
+  beamMoveRef,
+  onBeamMoveRefChange,
+  onBeamMoveHoleIndexChange,
+  onBeamAlongOffsetChange,
+  onButtBeam,
+  onBeamFlatEndChange,
   onBeamFitChange,
   onRefitBeam,
   onClearBeamHoleAxes,
@@ -557,6 +578,10 @@ export default function Toolbar({
   selectedDisc,
   onRemoveDisc,
 }: Props) {
+  // What the last "sit against a neighbour" did, so the panel can report the move and — the part
+  // that matters for whether the two beams take a pin — whether their holes ended up in step.
+  // "none" is the no-neighbour-found answer, which is worth saying rather than doing nothing.
+  const [buttNote, setButtNote] = useState<{ movedMm: number; alongMismatchMm: number } | "none" | null>(null);
   // The layer being edited sets the scale every mm figure in this panel is quoted at — a circle
   // group's radius, a beam's hole miss — since all of them are lattice measurements.
   const activePitch = layerPitch(grid, grid.activeLayer);
@@ -1106,6 +1131,53 @@ export default function Toolbar({
           </div>
 
           <div className="card-head" style={{ marginTop: 16 }}>
+            <h2>Move by</h2>
+          </div>
+          <p className="muted sm">
+            Which point on the beam lands on the square you drag it onto — its start, its centre,
+            its far end, or one of its own holes. Whichever you pick lands <strong>exactly</strong>
+            on that square&apos;s centre: the anchor goes to the nearest cell and the leftover
+            fraction of a stud becomes a rigid shift of the whole beam (the along- and across-
+            offsets below), body and holes together, so the part itself is unchanged. On a beam with
+            an odd hole count the centre and the middle hole are the same point, and both land in
+            the same place. The cost, on a diagonal, is that the beam&apos;s other holes come off
+            the lattice by that same shift — one point on the grid is all a diagonal beam can have.
+            The choice belongs to the beam: it sets the next beam painted, and with the Edit tool it
+            changes the selected beam only.
+          </p>
+          <div className="row gap" style={{ flexWrap: "wrap" }}>
+            {BEAM_MOVE_REFS.map((o) => (
+              <button
+                key={o.id}
+                className={`brush-btn${beamMoveRef === o.id ? " active" : ""}`}
+                onClick={() => onBeamMoveRefChange(o.id)}
+                title={o.hint}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          {selectedBeam && (selectedBeam.moveRef ?? "start") === "hole" && (
+            <>
+              <p className="muted sm" style={{ marginTop: 8 }}>
+                Which hole locks — 1 is the anchor end. Pick the one that has to sit in the existing
+                hole cell, usually an end hole.
+              </p>
+              <div className="row gap" style={{ flexWrap: "wrap" }}>
+                {Array.from({ length: selectedBeam.holes }, (_, i) => (
+                  <button
+                    key={i}
+                    className={`brush-btn${beamLockHoleIndex(selectedBeam) === i ? " active" : ""}`}
+                    onClick={() => onBeamMoveHoleIndexChange(i)}
+                  >
+                    {i + 1}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          <div className="card-head" style={{ marginTop: 16 }}>
             <h2>Beam fit</h2>
           </div>
           <p className="muted sm">
@@ -1228,16 +1300,96 @@ export default function Toolbar({
                   flush wall and puts the holes back.
                 </p>
               )}
+              <div className="card-head" style={{ marginTop: 16 }}>
+                <h2>End faces</h2>
+              </div>
+              <p className="muted sm">
+                A liftarm&apos;s round end is right where the end stands alone. Where two beams run
+                side by side it isn&apos;t: each cap is a half-disc about its own end hole, so the
+                pair finishes in a scallop with a notch between the two curves instead of one flat
+                face across both. Square the ends that meet — the other end of the same beam keeps
+                its cap.
+              </p>
+              <div className="row gap" style={{ flexWrap: "wrap" }}>
+                {(["start", "end"] as const).map((which) => {
+                  const flat = selectedBeam.flatEnds?.[which] ?? false;
+                  return (
+                    <button
+                      key={which}
+                      className={`brush-btn${flat ? " active" : ""}`}
+                      onClick={() => onBeamFlatEndChange(selectedBeam.id, which, !flat)}
+                      title={
+                        which === "start"
+                          ? "Square off the anchor end (hole 1) instead of rounding it"
+                          : "Square off the far end instead of rounding it"
+                      }
+                    >
+                      {which === "start" ? "Flat start" : "Flat far end"}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <p className="muted sm" style={{ marginTop: 8 }}>
+                Or sit it against another BEAM, which is two different things:{" "}
+                <strong>side by side</strong> puts it on the lattice line beside its neighbour —
+                two parallel beams making one wider part — while <strong>end to end</strong> puts
+                it on the neighbour&apos;s own centreline, continuing the same run. Both also slide
+                it along its run until its holes sit opposite the neighbour&apos;s, so a pin passes
+                squarely through both.
+              </p>
               <div className="row gap" style={{ flexWrap: "wrap" }}>
                 <button className="ghost sm" onClick={() => onFlushBeam(selectedBeam.id)}>
                   Flush outer wall to block corner
                 </button>
-                {selectedBeam.acrossOffset ? (
-                  <button className="ghost sm" onClick={() => onBeamAcrossOffsetChange(0)}>
+                <button
+                  className="ghost sm"
+                  onClick={() => setButtNote(onButtBeam(selectedBeam.id, "butt") ?? "none")}
+                  title="Side by side: moves this beam ACROSS onto the lattice line next to the nearest parallel beam, one pitch away, and along its own run until its holes sit opposite the neighbour's. Two beams running next to each other as one wider part."
+                >
+                  Sit alongside — side by side
+                </button>
+                <button
+                  className="ghost sm"
+                  onClick={() => setButtNote(onButtBeam(selectedBeam.id, "inline") ?? "none")}
+                  title="End to end: puts this beam on the SAME centreline as the nearest parallel beam, its holes carrying on at the same pitch. One continuous run rather than two beams side by side."
+                >
+                  Sit in line — end to end
+                </button>
+                {selectedBeam.acrossOffset || selectedBeam.alongOffset ? (
+                  <button
+                    className="ghost sm"
+                    onClick={() => {
+                      onBeamAcrossOffsetChange(0);
+                      onBeamAlongOffsetChange(0);
+                    }}
+                  >
                     Back to centre
                   </button>
                 ) : null}
               </div>
+              {buttNote === "none" && (
+                <p className="muted sm" style={{ marginTop: 8 }}>
+                  No parallel beam alongside this one on this layer — there is nothing to sit
+                  against. Beams count as neighbours only when they run at the same angle and their
+                  bodies overlap along that run.
+                </p>
+              )}
+              {buttNote && buttNote !== "none" && (
+                <p className="muted sm" style={{ marginTop: 8 }}>
+                  Moved {Math.abs(buttNote.movedMm).toFixed(2)}mm across, onto the next lattice
+                  line — the two beams&apos; hole lines are now exactly {activePitch}mm apart
+                  {buttNote.alongMismatchMm === 0 ? (
+                    <>, and their holes were already opposite each other.</>
+                  ) : (
+                    <>
+                      , and it slid the beam{" "}
+                      {Math.abs(buttNote.alongMismatchMm).toFixed(2)}mm along its own run so its
+                      holes sit opposite the neighbour&apos;s rather than between them.
+                    </>
+                  )}
+                </p>
+              )}
               <label className="field" style={{ width: "100%", marginTop: 8 }}>
                 <span>Across offset (mm)</span>
                 <input
@@ -1247,6 +1399,19 @@ export default function Toolbar({
                   onChange={(e) => onBeamAcrossOffsetChange(Number(e.target.value) || 0)}
                 />
               </label>
+              <label className="field" style={{ width: "100%", marginTop: 8 }}>
+                <span>Along offset (mm)</span>
+                <input
+                  type="number"
+                  step={0.1}
+                  value={Number((selectedBeam.alongOffset ?? 0).toFixed(3))}
+                  onChange={(e) => onBeamAlongOffsetChange(Number(e.target.value) || 0)}
+                />
+              </label>
+              <p className="muted sm">
+                The two shifts a snap uses: sideways and along the run. Both move the whole beam —
+                body and holes together — so the part itself is untouched.
+              </p>
             </>
           )}
 

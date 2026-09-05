@@ -4,6 +4,9 @@ import { AutoFillOptions, generateAutoFillLayer } from "../model/autofill";
 import {
   AngledBeam,
   BeamHoleAxis,
+  BeamMoveRef,
+  BeamNeighbourFit,
+  beamNeighbourOffset,
   BeamHoleType,
   beamFitToEndpoint,
   BeamFitMode,
@@ -223,6 +226,21 @@ export interface ProjectStore {
    * always did. */
   beamFit: BeamFitSetting;
   setBeamFit: (f: BeamFitSetting) => void;
+  /**
+   * Which point on a beam locks to the square under the cursor when the beam is moved — see
+   * BeamMoveRef. Like every other beam picker this is the setting for the NEXT beam painted, and
+   * it loads back out of whichever beam is selected — the choice is stored per beam
+   * (AngledBeam.moveRef) so picking "centre" for one beam doesn't move the grab handle on all of
+   * them.
+   */
+  /** Sits a beam against its nearest parallel neighbour — see the implementation for the geometry. */
+  buttBeamToNeighbour: (id: string, fit: BeamNeighbourFit) => { movedMm: number; alongMismatchMm: number } | null;
+  beamMoveRef: BeamMoveRef;
+  /** Sets it for the next beam painted and — with the Edit tool, on a selected beam — for that
+   * beam alone, exactly as every other beam picker behaves. */
+  setBeamMoveRef: (r: BeamMoveRef) => void;
+  /** Which hole a "hole" lock holds the selected beam by — see AngledBeam.moveHoleIndex. */
+  setBeamMoveHoleIndex: (index: number) => void;
   /** Re-runs the fit on an existing beam, between its own anchor and endpoint. */
   refitBeam: (id: string, mode: BeamFitSetting) => void;
   /** Drops every per-hole override on the selected beam, back to one uniform bore direction. */
@@ -317,6 +335,7 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
   const [beamHoleAxis, setBeamHoleAxisState] = useState<BeamHoleAxis>("z");
   const [beamGusset, setBeamGussetState] = useState(0);
   const [beamFit, setBeamFit] = useState<BeamFitSetting>("auto");
+  const [beamMoveRef, setBeamMoveRefState] = useState<BeamMoveRef>("start");
   const [discSettings, setDiscSettingsState] = useState<SlotDiscSettings>(DEFAULT_DISC_SETTINGS);
   const [selectedDiscId, setSelectedDiscId] = useState<string | null>(null);
   const undoStack = useRef<GridState[]>([]);
@@ -350,6 +369,7 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
     setBeamHoleTypeState(beam.holeType);
     setBeamHoleAxisState(beam.holeAxis);
     setBeamGussetState(beam.gusset ?? 0);
+    setBeamMoveRefState(beam.moveRef ?? "start");
     setPlateFraction(beam.plateFraction ?? "module");
     setWidthFraction(beam.widthFraction);
     setRoundedEdges(beam.roundedEnds ?? true);
@@ -497,6 +517,7 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
           const beam: AngledBeam = {
             ...createAngledBeam(prev.activeLayer, sx, sy),
             angleId: beamAngleId,
+            moveRef: beamMoveRef === "start" ? undefined : beamMoveRef,
             customDegrees: beamCustomDegrees,
             mirror: beamMirror,
             reverse: beamReverse,
@@ -703,6 +724,7 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       beamHoleType,
       beamHoleAxis,
       beamGusset,
+      beamMoveRef,
       discSettings,
       loadBeamIntoPickers,
     ],
@@ -854,6 +876,19 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       const clamped = Math.max(1, Math.min(40, n));
       setBeamHolesState(clamped);
       applyToSelectedBeam({ holes: clamped, endpoint: undefined });
+    },
+    [applyToSelectedBeam],
+  );
+  const setBeamMoveRef = useCallback(
+    (r: BeamMoveRef) => {
+      setBeamMoveRefState(r);
+      applyToSelectedBeam({ moveRef: r === "start" ? undefined : r });
+    },
+    [applyToSelectedBeam],
+  );
+  const setBeamMoveHoleIndex = useCallback(
+    (index: number) => {
+      applyToSelectedBeam({ moveRef: "hole", moveHoleIndex: index });
     },
     [applyToSelectedBeam],
   );
@@ -1459,6 +1494,40 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
    * blocks at its ends — see AngledBeam.acrossOffset. Returns the shift applied, or null when
    * there is nothing at either end to line up with.
    */
+  /**
+   * Sits a beam against the nearest PARALLEL beam on its layer — walls touching ("butt"), or both
+   * on one centreline ("inline"). Two beams fuse when they touch, so this is what "join these two
+   * beams" actually means; see beamNeighbourOffset for why the gap is never the obvious size.
+   *
+   * Returns what it did, so the panel can say which way the beam moved and whether the two hole
+   * patterns ended up in step along the run — the sideways fit can't settle that on its own.
+   */
+  const buttBeamToNeighbour = useCallback(
+    (id: string, fit: BeamNeighbourFit): { movedMm: number; alongMismatchMm: number } | null => {
+      let applied: { movedMm: number; alongMismatchMm: number } | null = null;
+      setGridState((prev) => {
+        const beam = (prev.beams ?? []).find((b) => b.id === id);
+        if (!beam) return prev;
+        const bp = layerPitch(prev, beam.layer);
+        const width = Math.min(bp, fixedPlateHeight(beam.widthFraction, bp) ?? bp);
+        const others = (prev.beams ?? [])
+          .filter((b) => b.id !== beam.id && b.layer === beam.layer)
+          .map((b) => ({ beam: b, width: Math.min(bp, fixedPlateHeight(b.widthFraction, bp) ?? bp) }));
+        const found = beamNeighbourOffset(beam, width, others, fit, bp);
+        if (!found) return prev;
+        applied = { movedMm: found.movedMm, alongMismatchMm: found.alongMismatchMm };
+        const next = updateBeam(prev, id, {
+          acrossOffset: found.acrossOffset || undefined,
+          alongOffset: found.alongOffset || undefined,
+        });
+        if (next !== prev) pushHistory(prev);
+        return next;
+      });
+      return applied;
+    },
+    [],
+  );
+
   const flushBeamToBlocks = useCallback((id: string): number | null => {
     let applied: number | null = null;
     setGridState((prev) => {
@@ -1777,11 +1846,15 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       setBeamGusset,
       beamFit,
       setBeamFit,
+      beamMoveRef,
+      setBeamMoveRef,
+      setBeamMoveHoleIndex,
       refitBeam,
       clearBeamHoleAxes,
       updateBeam: updateBeamAction,
       clearBeamFit,
       flushBeamToBlocks,
+      buttBeamToNeighbour,
       removeBeam: removeBeamAction,
       discSettings,
       setDiscSettings,
@@ -1869,11 +1942,15 @@ export function useProjectStore(initialWidth = 10, initialHeight = 10): ProjectS
       setBeamGusset,
       beamFit,
       setBeamFit,
+      beamMoveRef,
+      setBeamMoveRef,
+      setBeamMoveHoleIndex,
       refitBeam,
       clearBeamHoleAxes,
       updateBeamAction,
       clearBeamFit,
       flushBeamToBlocks,
+      buttBeamToNeighbour,
       removeBeamAction,
       discSettings,
       setDiscSettings,

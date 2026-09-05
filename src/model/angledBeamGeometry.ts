@@ -8,6 +8,7 @@ import {
   beamBodySpanStuds,
   beamDirection,
   beamEndsMeetingBeams,
+  beamEndIsFlat,
   beamSuppressedHoles,
 } from "./angledBeam";
 import { CellType } from "./cellTypes";
@@ -85,6 +86,12 @@ export async function buildAngledBeamGeometry(
   pitch: number = STUD_PITCH,
   /** The beam's layer's own connector scale — its BORES follow it, independently of `pitch`. */
   connectorScale = 1,
+  /**
+   * Which SIDE another beam runs alongside at each end — see beamEndSideJoins. The half of a
+   * rounded cap facing a neighbour is filled square, so the pair finishes in one flat face across
+   * both while the outer half keeps its radius.
+   */
+  sideJoins: { start: number; end: number } = { start: 0, end: 0 },
 ): Promise<{ body: THREE.BufferGeometry; throughCutters: THREE.BufferGeometry[] }> {
   const span = beamSpans(beam);
   const runLength = span * pitch;
@@ -103,8 +110,9 @@ export async function buildAngledBeamGeometry(
   // it a rounded end's cap does; a rounded one gets that material from the caps themselves. A
   // FITTED end needs neither — its lead-in already carries the material out to the cell — so it
   // ends flush at the cell centre, square, with nothing overhanging for a gusset to fight.
-  const capStart = rounded && lead.start <= 0;
-  const capEnd = rounded && lead.end <= 0;
+  // An end asked to be flat gets a square face, cap or no cap — see AngledBeam.flatEnds.
+  const capStart = rounded && !beamEndIsFlat(beam, "start") && lead.start <= 0;
+  const capEnd = rounded && !beamEndIsFlat(beam, "end") && lead.end <= 0;
   // A FITTED end (one carrying a lead-in) has no end hole at its tip to be concentric with, so it
   // cannot take the liftarm's D cap. It can still be rounded: a STADIUM end — the straight body
   // stopping a cap-radius short and a half-round centred there carrying it the rest of the way, so
@@ -114,15 +122,24 @@ export async function buildAngledBeamGeometry(
   // the cap would be invisible inside the material, and the end blend wants a straight wall to sit
   // its fillet against.
   const bodySpan = beamBodySpanStuds(beam, pitch);
-  const stadiumStart = rounded && lead.start > 0 && !beamEndIsBuried(grid, beam, bodySpan.from);
-  const stadiumEnd = rounded && lead.end > 0 && !beamEndIsBuried(grid, beam, bodySpan.to);
+  const stadiumStart =
+    rounded && !beamEndIsFlat(beam, "start") && lead.start > 0 && !beamEndIsBuried(grid, beam, bodySpan.from);
+  const stadiumEnd =
+    rounded && !beamEndIsFlat(beam, "end") && lead.end > 0 && !beamEndIsBuried(grid, beam, bodySpan.to);
   // How far the body runs PAST each end hole: its lead-in when there is one, and otherwise the
   // half-stud a square end needs (a rounded one gets its material from the cap, and only overlaps
   // it enough to union cleanly).
-  const extStart = lead.start > 0 ? lead.start : rounded ? CELL_OVERLAP / 2 : pitch / 2;
-  const extEnd = lead.end > 0 ? lead.end : rounded ? CELL_OVERLAP / 2 : pitch / 2;
+  // A flat end is a square end: it needs the same half-stud of material past its end hole that a
+  // square-ended beam has, since it has no cap to supply it (see AngledBeam.flatEnds).
+  const extStart = lead.start > 0 ? lead.start : capStart ? CELL_OVERLAP / 2 : pitch / 2;
+  const extEnd = lead.end > 0 ? lead.end : capEnd ? CELL_OVERLAP / 2 : pitch / 2;
 
-  const stadiumRadius = Math.min(pitch / 2, beamWidth / 2);
+  // Built a hair wider than nominal, exactly as a cell is (see CELL_OVERLAP): two parts that meet
+  // on a lattice step have coplanar walls, and a mesh boolean cannot fuse those — it drops chunks
+  // or leaves them as two solids. The overlap gives the union thickness to work with while the
+  // beam's own lattice position, and so every hole it carries, stays exactly where it was.
+  const builtWidth = beamWidth + CELL_OVERLAP;
+  const stadiumRadius = Math.min(pitch / 2, builtWidth / 2);
   const bodyFrom = firstHole - extStart + (stadiumStart ? stadiumRadius : 0);
   const bodyTo = lastHole + extEnd - (stadiumEnd ? stadiumRadius : 0);
   const bodyLength = bodyTo - bodyFrom;
@@ -130,7 +147,7 @@ export async function buildAngledBeamGeometry(
   const parts: THREE.BufferGeometry[] = [];
 
   if (bodyLength > 0) {
-    const body = boxGeometry(bodyLength, beamWidth, beamHeight).clone();
+    const body = boxGeometry(bodyLength, builtWidth, beamHeight).clone();
     body.translate((bodyFrom + bodyTo) / 2, 0, 0);
     parts.push(body);
   }
@@ -176,14 +193,25 @@ export async function buildAngledBeamGeometry(
       const capAxis =
         suppressedHoles.has(end.hole) || joined ? "z" : beamHoleAxisAt(beam, end.hole);
       const capRadius =
-        capAxis === "z" ? Math.min(pitch / 2, beamWidth / 2) : Math.min(pitch / 2, halfHeight);
-      const capLength = capAxis === "z" ? beamHeight : beamWidth;
+        capAxis === "z" ? Math.min(pitch / 2, builtWidth / 2) : Math.min(pitch / 2, halfHeight);
+      const capLength = capAxis === "z" ? beamHeight : builtWidth;
       const cap = new THREE.CylinderGeometry(capRadius, capRadius, capLength, 48);
       // THREE's cylinder runs along Y. A "z" cap stands upright; an in-plane cap already points
       // along the beam's own perpendicular, which is +Y in this pre-rotation frame.
       if (capAxis === "z") cap.rotateX(Math.PI / 2);
       cap.translate(end.at, 0, 0);
       parts.push(cap);
+
+      // Square off the half of the cap that faces a beam alongside: a quarter-round outside, a
+      // flat face where the two meet. Without it the two half-discs curve away from each other and
+      // leave a notch down the join — the scallop a pair of rounded ends makes.
+      const side = end.hole === 0 ? sideJoins.start : sideJoins.end;
+      if (side !== 0 && capRadius > 0) {
+        const outward = end.hole === 0 ? -1 : 1;
+        const fill = boxGeometry(capRadius, builtWidth / 2, beamHeight).clone();
+        fill.translate(end.at + (outward * capRadius) / 2, (side * builtWidth) / 4, 0);
+        parts.push(fill);
+      }
     }
   }
 
@@ -231,7 +259,7 @@ export async function buildAngledBeamGeometry(
       // stays robust, while the bite it takes out of an adjacent block is finer than a print layer.
       const boreLength = vertical
         ? Math.max(beamHeight, layerHeight)
-        : Math.max(0.1, beamWidth - CUT_EPSILON * 2 + BORE_BREAKOUT * 2);
+        : Math.max(0.1, builtWidth - CUT_EPSILON * 2 + BORE_BREAKOUT * 2);
       // Built along "z" for a vertical bore, or along "y" for an in-plane one — "y" is this
       // pre-rotation frame's own perpendicular, so the single Z rotation below carries it onto the
       // beam's true perpendicular without the primitive ever needing to know about angles.
@@ -258,9 +286,12 @@ export async function buildAngledBeamGeometry(
   // pre-rotation frame where "across" is simply +Y, so the rotation below carries it onto the real
   // perpendicular. Everything the beam is made of moves together, holes included.
   const across = beam.acrossOffset ?? 0;
-  if (across !== 0) {
-    solid.translate(0, across, 0);
-    for (const cutter of throughCutters) cutter.translate(0, across, 0);
+  // The along-run shift (AngledBeam.alongOffset) rides the same pre-rotation frame, where "along"
+  // is +X. Body and holes move together, so the part is unchanged — it just sits further along.
+  const alongShift = beam.alongOffset ?? 0;
+  if (across !== 0 || alongShift !== 0) {
+    solid.translate(alongShift, across, 0);
+    for (const cutter of throughCutters) cutter.translate(alongShift, across, 0);
   }
 
   const angle = (beamAngleDegrees(beam) * Math.PI) / 180;
@@ -301,8 +332,11 @@ function beamEndIsBuried(
   const layer = grid.layers[beam.layer];
   if (!layer) return false;
   const dir = beamDirection(beam);
-  const gx = Math.round(beam.anchorX + dir.x * along);
-  const gy = Math.round(beam.anchorY + dir.y * along);
+  // The beam's rigid along-run shift moves its ends with it, so the cell an end is in is measured
+  // from where the end actually is (see AngledBeam.alongOffset).
+  const shifted = along + (beam.alongOffset ?? 0) / STUD_PITCH;
+  const gx = Math.round(beam.anchorX + dir.x * shifted);
+  const gy = Math.round(beam.anchorY + dir.y * shifted);
   if (!inBounds({ width: grid.width, height: grid.height }, gx, gy)) return false;
   return layer[indexOf({ width: grid.width }, gx, gy)].type !== CellType.Empty;
 }
@@ -353,8 +387,9 @@ export async function buildBeamJoinBlend(
     x: beam.anchorX + (along * dir.x + acrossMm * perp.x) / pitch,
     y: beam.anchorY + (along * dir.y + acrossMm * perp.y) / pitch,
   });
-  const from = body.from * pitch;
-  const to = body.to * pitch;
+  const shift = beam.alongOffset ?? 0;
+  const from = body.from * pitch + shift;
+  const to = body.to * pitch + shift;
   const hw = beamWidth / 2;
   const across = beam.acrossOffset ?? 0;
   const beamPoly: [number, number][] = [
@@ -632,8 +667,9 @@ function beamOutline(
     ay + along * dir.y + (over + across) * perp.y,
   ];
   const hw = width / 2;
-  const from = body.from * pitch;
-  const to = body.to * pitch;
+  const shift = beam.alongOffset ?? 0;
+  const from = body.from * pitch + shift;
+  const to = body.to * pitch + shift;
   // A cap is only there when that end has no lead-in — the same rule the builder uses, since a
   // lead-in carries the body past its end hole and a cap concentric with that hole is then wrong.
   // Round in PLAN only where the built cap is: a "z" cap is a vertical cylinder and shows as a
@@ -644,13 +680,16 @@ function beamOutline(
     suppressed.has(index) ||
     (index === 0 ? joinedEnds.start : joinedEnds.end) ||
     beamHoleAxisAt(beam, index) === "z";
-  const capStart = rounded && lead.start <= 0 && capsInPlan(0);
-  const capEnd = rounded && lead.end <= 0 && capsInPlan(Math.max(0, beam.holes - 1));
+  const capStart = rounded && !beamEndIsFlat(beam, "start") && lead.start <= 0 && capsInPlan(0);
+  const capEnd =
+    rounded && !beamEndIsFlat(beam, "end") && lead.end <= 0 && capsInPlan(Math.max(0, beam.holes - 1));
   // A fitted end that hangs in air is built as a stadium (see buildAngledBeamGeometry), and the
   // blend has to cross against the outline the part really has — a square corner that isn't there
   // manufactures a fillet that isn't either.
-  const stadiumStart = rounded && lead.start > 0 && !beamEndIsBuried(grid, beam, body.from);
-  const stadiumEnd = rounded && lead.end > 0 && !beamEndIsBuried(grid, beam, body.to);
+  const stadiumStart =
+    rounded && !beamEndIsFlat(beam, "start") && lead.start > 0 && !beamEndIsBuried(grid, beam, body.from);
+  const stadiumEnd =
+    rounded && !beamEndIsFlat(beam, "end") && lead.end > 0 && !beamEndIsBuried(grid, beam, body.to);
   const capRadius = Math.min(pitch / 2, hw);
 
   const points: [number, number][] = [];

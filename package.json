@@ -9,13 +9,14 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "electron": "npm run build && npm --prefix electron start",
-    "electron-dev": "npm run build && BLOCKBUILDER_DEV_SERVER_URL=http://localhost:5174 npm --prefix electron run dev",
+    "copy-web-dist": "rm -rf electron/web-dist && cp -R dist electron/web-dist",
+    "electron": "npm run build && npm run copy-web-dist && npm --prefix electron start",
+    "electron-dev": "npm run build && npm run copy-web-dist && BLOCKBUILDER_DEV_SERVER_URL=http://localhost:5174 npm --prefix electron run dev",
     "electron-dev:devtools": "npm run dev &  npm --prefix electron run dev:devtools",
-    "electron-dist": "npm run build && npm --prefix electron run dist",
-    "electron-dist:mac": "npm run build && npm --prefix electron run dist -- --mac",
-    "electron-dist:win": "npm run build && npm --prefix electron run dist -- --win",
-    "electron-dist:linux": "npm run build && npm --prefix electron run dist -- --linux"
+    "electron-dist": "npm run build && npm run copy-web-dist && npm --prefix electron run dist",
+    "electron-dist:mac": "npm run build && npm run copy-web-dist && npm --prefix electron run dist -- --mac",
+    "electron-dist:win": "npm run build && npm run copy-web-dist && npm --prefix electron run dist -- --win",
+    "electron-dist:linux": "npm run build && npm run copy-web-dist && npm --prefix electron run dist -- --linux"
   },
   "dependencies": {
     "@fontsource/fredoka": "^5.3.0",

@@ -1,4 +1,5 @@
-import { Save, FolderOpen, Eraser, Download, RotateCcw, RotateCw } from "lucide-react";
+import { Save, SaveAll, FolderOpen, Eraser, Download, RotateCcw, RotateCw } from "lucide-react";
+import { rememberedName } from "../export/saveTarget";
 import { downloadGeometryAsSTL } from "../export/stlExport";
 import { buildGridGeometry } from "../model/geometry";
 import { GridState } from "../model/grid";
@@ -7,7 +8,8 @@ interface Props {
   theme: "dark" | "light";
   onToggleTheme: () => void;
   grid: GridState;
-  onSaveProject: () => void;
+  /** `saveAs` forces the file dialog; without it the save goes back to the file chosen last time. */
+  onSaveProject: (saveAs: boolean) => void | Promise<void>;
   onLoadProject: () => void;
   onClearProject: () => void;
   onError: (message: string) => void;
@@ -26,10 +28,11 @@ interface Props {
 
 export default function Header({ theme, onToggleTheme, grid, onSaveProject, onLoadProject, onClearProject, onError, onUndo, onRedo, canUndo, canRedo, hiddenLayers }: Props) {
   const hiddenCount = hiddenLayers.size;
+  const savedName = rememberedName("project");
   const handleExportSTL = async () => {
     try {
       const geometry = await buildGridGeometry(grid, hiddenLayers);
-      await downloadGeometryAsSTL(geometry, "blockbuilder-part.stl");
+      await downloadGeometryAsSTL(geometry, "blockbuilder-part.stl", "part");
     } catch (err) {
       console.error("Failed to export STL:", err);
       onError(`Failed to export STL: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -48,10 +51,17 @@ export default function Header({ theme, onToggleTheme, grid, onSaveProject, onLo
       <div className="header-actions">
         <button
           className="icon-btn ghost"
-          onClick={onSaveProject}
-          title="Save project to file"
+          onClick={() => onSaveProject(false)}
+          title={`Save project — straight back to the file you saved to last${savedName ? ` (${savedName})` : ", after choosing one"}`}
         >
           <Save size={18} />
+        </button>
+        <button
+          className="icon-btn ghost"
+          onClick={() => onSaveProject(true)}
+          title="Save project as… — choose a new file, which later saves then go back to"
+        >
+          <SaveAll size={18} />
         </button>
         <button
           className="icon-btn ghost"

@@ -1,41 +1,14 @@
-export async function downloadBlob(blob: Blob, filename: string) {
-  // Try using File System Access API first (shows save dialog)
-  if ('showSaveFilePicker' in window) {
-    try {
-      const handle = await (window as any).showSaveFilePicker({
-        suggestedName: filename,
-        types: [
-          {
-            description: filename.endsWith('.json') ? 'JSON File' : filename.endsWith('.stl') ? 'STL File' : 'File',
-            accept: { [blob.type]: [filename.split('.').pop() ? '.' + filename.split('.').pop() : ''] }
-          }
-        ]
-      });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      return;
-    } catch (err) {
-      // User cancelled - don't fall back, just return
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return;
-      }
-      // Other errors - log and fall back to default download
-      console.warn('File System Access API failed, using default download:', err);
-    }
-  }
+import { saveBlob } from "./saveTarget";
 
-  // Fallback: use traditional download method
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+/**
+ * Saving a file. Everything goes through saveTarget's remembered handle, so a second save of the
+ * same thing goes back to the same file rather than asking again — see that module for why the
+ * write, not the dialog, is what counts as a save.
+ */
+export async function downloadBlob(blob: Blob, filename: string, key = filename, saveAs = false) {
+  return saveBlob(blob, key, filename, saveAs);
 }
 
-export function downloadText(text: string, filename: string, mimeType = "application/json") {
-  downloadBlob(new Blob([text], { type: mimeType }), filename);
+export function downloadText(text: string, filename: string, mimeType = "application/json", key = filename, saveAs = false) {
+  return downloadBlob(new Blob([text], { type: mimeType }), filename, key, saveAs);
 }

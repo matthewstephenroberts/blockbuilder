@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { buildAngledBeamGeometry, buildBeamJoinBlend } from "./angledBeamGeometry";
-import { beamEndsMeetingBeams } from "./angledBeam";
+import { beamEndsMeetingBeams, beamEndSideJoins } from "./angledBeam";
 import { buildSlotDiscGeometry } from "./slotDiscGeometry";
 import { buildBallPinGeometry } from "./ballPin";
 import { buildCircleSolidGeometry, CIRCLE_CUT_OVERHANG, CIRCLE_SEGMENTS } from "./circleSolidGeometry";
@@ -1317,6 +1317,15 @@ export async function buildGridGeometry(
       ),
       beamPitch,
       beamConnectorScale,
+      // Which side each end has a beam running alongside it, so a rounded end is squared only on
+      // the half that faces the neighbour (see beamEndSideJoins).
+      beamEndSideJoins(
+        beam,
+        (grid.beams ?? [])
+          .filter((b) => b.id !== beam.id && b.layer === beam.layer && !hiddenLayers?.has(b.layer))
+          .map((b) => ({ beam: b, width: beamWidths.get(b.id) ?? beamPitch })),
+        beamPitch,
+      ),
     );
     bodyParts.push(built.body);
     assemblyCutters.push(...built.throughCutters);

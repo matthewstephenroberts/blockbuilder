@@ -12,6 +12,8 @@ import { createEmptyGrid, layerPitch } from "./model/grid";
 import { deserializeProject, serializeProject } from "./model/project";
 import { useProjectStore } from "./state/useProjectStore";
 import { downloadText } from "./export/download";
+import { downloadLayerAsSTL } from "./export/stlExport";
+import { buildGridGeometry } from "./model/geometry";
 
 export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -106,7 +108,23 @@ export default function App() {
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
         grid={store.grid}
-        onSaveProject={() => downloadText(serializeProject(store.grid), "blockbuilder-project.json")}
+        onSaveProject={async (saveAs) => {
+          // Awaited and reported: the save goes through a picker, and a failure part-way used to
+          // surface as nothing at all — or, worse, as the zero-byte file the picker had already
+          // created (see export/saveTarget.ts). `saveAs` forces the dialog; a plain save writes
+          // back to the file chosen last time.
+          try {
+            await downloadText(
+              serializeProject(store.grid),
+              "blockbuilder-project.json",
+              "application/json",
+              "project",
+              saveAs,
+            );
+          } catch (err) {
+            setErrorMessage(`Failed to save the project: ${err instanceof Error ? err.message : "Unknown error"}`);
+          }
+        }}
         onLoadProject={() => fileInput.current?.click()}
         onClearProject={() => setConfirmingClear(true)}
         onError={setErrorMessage}
@@ -199,10 +217,24 @@ export default function App() {
             beamGusset={store.beamGusset}
             beamFit={store.beamFit}
             onBeamFitChange={store.setBeamFit}
+            beamMoveRef={store.beamMoveRef}
+            onBeamMoveRefChange={store.setBeamMoveRef}
+            onBeamMoveHoleIndexChange={store.setBeamMoveHoleIndex}
+            onBeamAlongOffsetChange={(mm) => store.updateBeam(store.selectedBeamId!, { alongOffset: mm || undefined })}
             onRefitBeam={store.refitBeam}
             onBeamGussetChange={store.setBeamGusset}
             onClearBeamFit={store.clearBeamFit}
             onFlushBeam={store.flushBeamToBlocks}
+            onButtBeam={store.buttBeamToNeighbour}
+            onBeamFlatEndChange={(id, end, flat) => {
+              const beam = (store.grid.beams ?? []).find((b) => b.id === id);
+              const next = { ...(beam?.flatEnds ?? {}), [end]: flat || undefined };
+              store.updateBeam(id, {
+                // Dropped entirely once neither end is squared, so a beam back on plain round caps
+                // reads that way in a saved project.
+                flatEnds: next.start || next.end ? next : undefined,
+              });
+            }}
             onBeamAcrossOffsetChange={(mm) => store.updateBeam(store.selectedBeamId!, { acrossOffset: mm || undefined })}
             onRemoveBeam={store.removeBeam}
             beamAngleId={store.beamAngleId}
@@ -281,13 +313,20 @@ export default function App() {
               onResize={store.resize}
               hiddenLayers={store.hiddenLayers}
               onToggleLayerVisibility={store.toggleLayerVisibility}
+              onExportLayer={async (index) => {
+                try {
+                  await downloadLayerAsSTL(store.grid, index, buildGridGeometry);
+                } catch (err) {
+                  setErrorMessage(`Failed to export layer ${index + 1}: ${err instanceof Error ? err.message : "Unknown error"}`);
+                }
+              }}
               selectedBeamId={store.selectedBeamId}
               onSelectBeam={store.selectBeam}
               selectedDiscId={store.selectedDiscId}
               onSelectDisc={store.selectDisc}
               onMoveDiscCentre={(id, centreX, centreY) => store.setDiscCentre(id, centreX, centreY)}
               onBeginBeamDrag={store.checkpoint}
-              onMoveBeamAnchor={(id, anchorX, anchorY) => store.updateBeam(id, { anchorX, anchorY }, false)}
+              onMoveBeamTo={(id, patch) => store.updateBeam(id, patch, false)}
               onMoveCell={store.moveCell}
             />
           </div>

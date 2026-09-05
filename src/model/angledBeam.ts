@@ -132,6 +132,17 @@ export interface AngledBeam {
   /** Full-round end caps, as on a real liftarm. Default true. */
   roundedEnds?: boolean;
   /**
+   * Ends forced SQUARE, whatever `roundedEnds` says — "start" is the anchor end.
+   *
+   * A liftarm's round end is right where the end stands alone. Where two beams run side by side it
+   * is wrong: each cap is a half-disc about its own end hole, so the pair finishes in a scallop
+   * with a notch between the two curves instead of one flat face across the width of both. The
+   * same goes for a beam ending against anything meant to read as flush. This is per end rather
+   * than per beam because the other end of the same beam usually still stands alone and still
+   * wants its cap.
+   */
+  flatEnds?: { start?: boolean; end?: boolean };
+  /**
    * How far the beam's body runs BEFORE its first hole, in mm (0 = the body starts at the first
    * hole, which is every beam that predates this field).
    *
@@ -187,11 +198,42 @@ export interface AngledBeam {
    */
   acrossOffset?: number;
   /**
+   * A shift of the whole beam ALONG its own run, in mm (positive toward the beam's far end) — the
+   * companion to `acrossOffset`, and the other half of what a sub-cell alignment needs.
+   *
+   * Body and holes move together, so nothing about the part changes: same length, same 8mm pitch,
+   * same end caps. That's what separates it from the lead-ins, which also move the holes along but
+   * do it by growing material at one end — which starves the end hole (see beamAutoSuppressedHoles)
+   * and turns a rounded cap into a fitted face. Landing one hole exactly on a cell centre needs a
+   * shift, not a change of part, so it belongs here.
+   */
+  alongOffset?: number;
+  /**
    * The cell this beam was fitted to run to, when it was placed by dragging from one cell to
    * another. Kept so the fit can be re-derived (and shown) rather than only being visible as the
    * angle and lead-ins it happened to produce.
    */
   endpoint?: { x: number; y: number };
+  /**
+   * Which point on THIS beam locks to the square it's dragged onto — see BeamMoveRef. Absent means
+   * the anchor end, which is how every beam behaved before the choice existed.
+   *
+   * It lives on the beam rather than being one editor-wide setting because the choice belongs to
+   * the beam's job: the arms of a frame are held by the end that meets the hub, while the beam
+   * that has to sit centred on a plate is held by its middle. A global setting made picking
+   * "centre" for one beam move the grab handle on every other beam on the layer, which reads as
+   * the control having edited them all.
+   */
+  moveRef?: BeamMoveRef;
+  /**
+   * Which hole a "hole" lock holds the beam by — 0 = the anchor hole. Absent means the middle one.
+   *
+   * The hole that has to line up with something is usually an END hole: a brace meets the block it
+   * pins to at its tip, not at its waist. Fixing the lock to the middle hole would have made the
+   * one case the lock exists for — dropping a beam's own hole onto a hole cell that is already
+   * there — the one case it couldn't do.
+   */
+  moveHoleIndex?: number;
 }
 
 /** The bore direction hole `index` actually uses — its own override, or the beam's own setting. */
@@ -319,6 +361,11 @@ export function beamLeadIn(beam: AngledBeam): { start: number; end: number } {
   return { start, end: beam.leadInEnd ?? start };
 }
 
+/** Whether that end is built as a flat face — asked for outright, or because the end is fitted. */
+export function beamEndIsFlat(beam: AngledBeam, end: "start" | "end"): boolean {
+  return end === "start" ? (beam.flatEnds?.start ?? false) : (beam.flatEnds?.end ?? false);
+}
+
 /** True when that end of the beam is fitted to a cell rather than finishing at its own end hole.
  * A fitted end can't carry a round cap: a liftarm's cap is a half-circle concentric with the end
  * HOLE, and once the body runs past that hole a circle at the body's end is centred on nothing.
@@ -336,8 +383,10 @@ export function beamBodySpanStuds(beam: AngledBeam, pitch: number = STUD_PITCH):
   // An unfitted square end still needs its half-stud of material past the end hole; a rounded one
   // gets that from the cap. Same rule the geometry builder uses, kept here so the 2D overlay draws
   // the body the length it will actually print.
-  const extStart = lead.start > 0 ? lead.start : rounded ? 0 : pitch / 2;
-  const extEnd = lead.end > 0 ? lead.end : rounded ? 0 : pitch / 2;
+  const roundStart = rounded && !beamEndIsFlat(beam, "start");
+  const roundEnd = rounded && !beamEndIsFlat(beam, "end");
+  const extStart = lead.start > 0 ? lead.start : roundStart ? 0 : pitch / 2;
+  const extEnd = lead.end > 0 ? lead.end : roundEnd ? 0 : pitch / 2;
   return {
     from: (lead.start - extStart) / pitch,
     to: (lead.start + beamSpans(beam) * pitch + extEnd) / pitch,
@@ -378,7 +427,8 @@ function endHoleMaterial(beam: AngledBeam, end: "start" | "end", pitch: number =
   const lead = beamLeadIn(beam);
   const at = end === "start" ? lead.start : lead.end;
   if (at > 0) return at;
-  return (beam.roundedEnds ?? true) ? Infinity : pitch / 2;
+  // A flat end has no cap to carry material past its hole, so it is measured like a square one.
+  return (beam.roundedEnds ?? true) && !beamEndIsFlat(beam, end) ? Infinity : pitch / 2;
 }
 
 /**
@@ -436,9 +486,10 @@ export function beamHolePositions(beam: AngledBeam, pitch: number = STUD_PITCH):
   const dir = beamDirection(beam);
   const perp = { x: -dir.y, y: dir.x };
   const across = (beam.acrossOffset ?? 0) / pitch;
+  const shift = (beam.alongOffset ?? 0) / pitch;
   const out: { x: number; y: number }[] = [];
   for (let i = 0; i < beam.holes; i++) {
-    const along = beamHoleOffsetStuds(beam, i, pitch);
+    const along = beamHoleOffsetStuds(beam, i, pitch) + shift;
     out.push({
       x: beam.anchorX + dir.x * along + perp.x * across,
       y: beam.anchorY + dir.y * along + perp.y * across,
@@ -877,10 +928,14 @@ export function beamPlanOutline(
   const body = beamBodySpanStuds(beam, pitch);
   const lead = beamLeadIn(beam);
   const across = (beam.acrossOffset ?? 0) / pitch;
+  // The beam's rigid shift along its own run travels with the outline, exactly as the across-shift
+  // does — otherwise a snapped beam draws its body where it used to be and its holes where they
+  // now are, which reads as the plan being broken rather than the beam having moved.
+  const shift = (beam.alongOffset ?? 0) / pitch;
   const hw = widthStuds / 2;
   const at = (along: number, over: number) => ({
-    x: beam.anchorX + dir.x * along + perp.x * (over + across),
-    y: beam.anchorY + dir.y * along + perp.y * (over + across),
+    x: beam.anchorX + dir.x * (along + shift) + perp.x * (over + across),
+    y: beam.anchorY + dir.y * (along + shift) + perp.y * (over + across),
   });
   const suppressed = new Set(beamSuppressedHoles(beam));
   const capsInPlan = (index: number) =>
@@ -888,8 +943,9 @@ export function beamPlanOutline(
     (index === 0 ? (joinedEnds?.start ?? false) : (joinedEnds?.end ?? false)) ||
     beamHoleAxisAt(beam, index) === "z";
   const rounded = beam.roundedEnds ?? true;
-  const capStart = rounded && lead.start <= 0 && capsInPlan(0);
-  const capEnd = rounded && lead.end <= 0 && capsInPlan(Math.max(0, beam.holes - 1));
+  const capStart = rounded && !beamEndIsFlat(beam, "start") && lead.start <= 0 && capsInPlan(0);
+  const capEnd =
+    rounded && !beamEndIsFlat(beam, "end") && lead.end <= 0 && capsInPlan(Math.max(0, beam.holes - 1));
   const capR = Math.min(0.5, hw);
 
   const out: { x: number; y: number }[] = [];
@@ -905,7 +961,11 @@ export function beamPlanOutline(
   // wide. Stopping the outline at the hole understates it by exactly the overhang being looked for.
   const rounded0 = beam.roundedEnds ?? true;
   const flatEnd = (index: number) =>
-    rounded0 && (index === 0 ? lead.start <= 0 : lead.end <= 0) ? capR : 0;
+    rounded0 &&
+    !beamEndIsFlat(beam, index === 0 ? "start" : "end") &&
+    (index === 0 ? lead.start <= 0 : lead.end <= 0)
+      ? capR
+      : 0;
   if (capEnd) arc(body.to, -Math.PI / 2, Math.PI / 2);
   else {
     const over = flatEnd(Math.max(0, beam.holes - 1));
@@ -919,4 +979,378 @@ export function beamPlanOutline(
     out.push(at(body.from - over, -hw));
   }
   return out;
+}
+
+/**
+ * Which point on a beam is the one that locks to a grid square when the beam is moved.
+ *
+ * A beam is anchored by its body START, which is the right handle for a brace running away from
+ * something — but it's the wrong one for a beam that has to sit centred on a square shape (a hub,
+ * a plate, another beam's middle hole). Centring it by dragging the start means computing where
+ * the start has to be for the middle to land where you want, which is exactly the arithmetic the
+ * editor should be doing. Letting the lock point be either end or the centre does that: the point
+ * you picked lands on the square under the cursor, and the anchor is back-solved from it.
+ *
+ * "end" is the body's FAR end (past any lead-in and end cap), not its last hole — the same extent
+ * the plan outline draws, so what locks to the square is what you can see touching it.
+ */
+export type BeamMoveRef = "start" | "centre" | "end" | "hole";
+
+export const BEAM_MOVE_REFS: readonly { id: BeamMoveRef; label: string; hint: string }[] = [
+  { id: "start", label: "Start", hint: "The beam's anchor end — where it has always been held." },
+  { id: "centre", label: "Centre", hint: "The middle of the beam's body, for centring it on a shape." },
+  { id: "end", label: "Far end", hint: "The far end of the beam's body." },
+  {
+    id: "hole",
+    label: "A hole",
+    hint: "One of the beam's own holes (pick which below), landed EXACTLY on the square's centre — the lead-ins and across-offset take up the fraction of a stud that the anchor can't.",
+  },
+];
+
+/** The middle hole — on an even count the lower of the two middles, there being no single one. */
+export function beamMiddleHoleIndex(beam: AngledBeam): number {
+  return Math.max(0, Math.floor((beam.holes - 1) / 2));
+}
+
+/** The hole a "hole" lock actually holds the beam by — its own choice, clamped to the holes it
+ * still has (shortening a beam mustn't leave the lock pointing past its end), or the middle. */
+export function beamLockHoleIndex(beam: AngledBeam): number {
+  const i = beam.moveHoleIndex ?? beamMiddleHoleIndex(beam);
+  return Math.max(0, Math.min(beam.holes - 1, i));
+}
+
+/**
+ * Where the beam's lock point sits relative to its anchor cell, in studs (grid storage order).
+ * Includes the beam's own across-shift, so the point tracks where the beam actually is rather
+ * than where its anchor cell is — see AngledBeam.acrossOffset.
+ */
+export function beamRefOffsetStuds(
+  beam: AngledBeam,
+  ref: BeamMoveRef,
+  pitch: number = STUD_PITCH,
+): { x: number; y: number } {
+  const dir = beamDirection(beam);
+  const body = beamBodySpanStuds(beam, pitch);
+  const along =
+    ref === "start"
+      ? body.from
+      : ref === "end"
+        ? body.to
+        : ref === "hole"
+          ? beamHoleOffsetStuds(beam, beamLockHoleIndex(beam), pitch)
+          : (body.from + body.to) / 2;
+  const across = (beam.acrossOffset ?? 0) / pitch;
+  const shift = along + (beam.alongOffset ?? 0) / pitch;
+  return { x: dir.x * shift - dir.y * across, y: dir.y * shift + dir.x * across };
+}
+
+/** The grid square the beam's lock point falls on — what an Alt-drag picks the beam up by. */
+export function beamRefCell(
+  beam: AngledBeam,
+  ref: BeamMoveRef,
+  pitch: number = STUD_PITCH,
+): { x: number; y: number } {
+  const off = beamRefOffsetStuds(beam, ref, pitch);
+  return { x: Math.round(beam.anchorX + off.x), y: Math.round(beam.anchorY + off.y) };
+}
+
+/**
+ * The anchor the beam needs so that its `ref` point lands on cell (`targetX`, `targetY`).
+ *
+ * The anchor stays a whole grid cell — it's what everything else about the beam is measured from,
+ * and a fractional one would take every hole off the lattice. So a diagonal beam of even body
+ * length can't put its exact centre on a cell centre, and this lands on the nearest cell it can;
+ * the beam's own across-offset and lead-ins are the sub-cell adjustments for the rest.
+ */
+export function beamAnchorForRef(
+  beam: AngledBeam,
+  ref: BeamMoveRef,
+  targetX: number,
+  targetY: number,
+  pitch: number = STUD_PITCH,
+): { anchorX: number; anchorY: number } {
+  const off = beamRefOffsetStuds(beam, ref, pitch);
+  return { anchorX: Math.round(targetX - off.x), anchorY: Math.round(targetY - off.y) };
+}
+
+/**
+ * Everything a beam needs so that its `ref` point lands EXACTLY on the centre of cell
+ * (`targetX`, `targetY`) — the anchor cell plus the sub-cell shift that finishes the job.
+ *
+ * The anchor is a whole grid cell, so on a diagonal it can only ever get the lock point to within
+ * half a cell of where you wanted it — which is why dropping a 45° beam onto a Technic-hole cell
+ * never quite lined up. The leftover is taken up by the beam's own two rigid shifts, `alongOffset`
+ * and `acrossOffset`: the whole part moves, holes and body together, so nothing about it changes —
+ * same length, same 8mm pitch, same caps — it just sits where it was asked to.
+ *
+ * Every lock point works this way, so on a 3-hole beam "centre" and "middle hole" land in the same
+ * place, which is the only thing they could sensibly mean.
+ *
+ * The trade is the one the panel already spells out for `acrossOffset`: the beam's OTHER holes come
+ * off the lattice by the same shift. On a diagonal that is unavoidable — one point is all a
+ * diagonal beam can ever have on the grid at once.
+ */
+export function beamSnapPatch(
+  beam: AngledBeam,
+  ref: BeamMoveRef,
+  targetX: number,
+  targetY: number,
+  pitch: number = STUD_PITCH,
+): Partial<AngledBeam> {
+  // The anchor is a whole cell, so there are four cells the hole could be hung off (the two
+  // roundings in X by the two in Y). The one that leaves the least to make up in offsets wins —
+  // rounding each axis independently doesn't, because the leftover is measured along the beam's
+  // own run rather than along X and Y.
+  const off = beamRefOffsetStuds(beam, ref, pitch);
+  const dir = beamDirection(beam);
+  const baseX = targetX - off.x;
+  const baseY = targetY - off.y;
+  let anchor = { anchorX: Math.round(baseX), anchorY: Math.round(baseY) };
+  let along = 0;
+  let across = 0;
+  let best = Infinity;
+  for (const ax of [Math.floor(baseX), Math.ceil(baseX)]) {
+    for (const ay of [Math.floor(baseY), Math.ceil(baseY)]) {
+      const rx = targetX - (ax + off.x);
+      const ry = targetY - (ay + off.y);
+      const a = (rx * dir.x + ry * dir.y) * pitch;
+      const c = (-rx * dir.y + ry * dir.x) * pitch;
+      const cost = Math.abs(a) + Math.abs(c);
+      if (cost < best) {
+        best = cost;
+        anchor = { anchorX: ax, anchorY: ay };
+        along = a;
+        across = c;
+      }
+    }
+  }
+
+  const alongOffset = (beam.alongOffset ?? 0) + along;
+  const acrossOffset = (beam.acrossOffset ?? 0) + across;
+  return {
+    ...anchor,
+    alongOffset: Math.abs(alongOffset) > 1e-9 ? alongOffset : undefined,
+    acrossOffset: Math.abs(acrossOffset) > 1e-9 ? acrossOffset : undefined,
+  };
+}
+
+/**
+ * Sitting one beam against a PARALLEL neighbour, which is two different arrangements:
+ *
+ * - "butt" — SIDE BY SIDE. The beam moves onto the lattice line beside its neighbour, one pitch
+ *   across, so the two run next to each other as one wider part.
+ * - "inline" — END TO END. The beam moves onto the neighbour's own centreline, so the two read as
+ *   one continuous run and the holes carry on at the same pitch.
+ *
+ * Both also bring the two hole patterns onto a common perpendicular — see beamNeighbourOffset.
+ */
+export type BeamNeighbourFit = "butt" | "inline";
+
+/** How far off parallel two beams may be and still count as neighbours, in degrees. Beams are
+ * placed on a small set of slopes, so anything not meant to be parallel is far outside this. */
+const PARALLEL_TOLERANCE_DEG = 0.5;
+
+/**
+ * The across-offset that puts `beam` against the nearest parallel beam on its layer.
+ *
+ * Two beams fuse when they touch — everything on a layer goes through one union — so "joining" two
+ * beams is not a flag to set but a distance to close. On a diagonal that distance is never what it
+ * looks like: a beam is one stud wide, while the lattice step ACROSS a 45° run is 11.31mm, so two
+ * beams on adjacent lattice lines sit 3.3mm apart and never meet however carefully they are drawn.
+ * A hole-snap widens the gap further, by giving one beam an across-offset its neighbour hasn't got.
+ *
+ * - "butt" puts them a whole LATTICE STEP apart — the layer's own pitch, 8mm or 10mm, or a
+ *   multiple of it where the two beams are too wide for one — so the two hole lines keep the exact
+ *   spacing a pin needs. It does NOT close the last fraction of a millimetre to make them touch:
+ *   the fusing is handled where it belongs, in the geometry, which builds every beam CELL_OVERLAP
+ *   wider than nominal exactly as a cell is built. Two beams on adjacent lattice lines therefore
+ *   overlap by 0.1mm of built material and union cleanly, while their nominal positions — and so
+ *   every hole they carry — stay exactly on the lattice.
+ * - "inline" puts them on the same centreline — end to end, one continuous run — rather than
+ *   beside each other.
+ *
+ * Returns null when there is no parallel beam to sit against, or when the beam is already there.
+ */
+export function beamNeighbourOffset(
+  beam: AngledBeam,
+  beamWidth: number,
+  others: readonly { beam: AngledBeam; width: number }[],
+  fit: BeamNeighbourFit,
+  pitch: number = STUD_PITCH,
+): {
+  acrossOffset: number;
+  neighbourId: string;
+  movedMm: number;
+  /** The along-run shift applied to bring the two hole patterns into the same perpendicular. */
+  alongOffset: number;
+  /**
+   * How far the beam moved ALONG its own run as part of this fit, in mm.
+   *
+   * The sideways move settles the spacing between the two hole lines and nothing else. Two beams
+   * can be the right distance apart and still have one beam's holes sitting between the other's,
+   * or be in step but staggered end to end like brickwork. So the fit slides the beam along until
+   * it is centred on its neighbour, snapped to the nearest whole hole-spacing from there — holes
+   * lining up is the constraint, being centred is the preference.
+   */
+  alongMismatchMm: number;
+} | null {
+  const dir = beamDirection(beam);
+  const perp = { x: -dir.y, y: dir.x };
+  const mine = beamAngleDegrees(beam);
+  const body = beamBodySpanStuds(beam, pitch);
+
+  // The beam's own centreline, as a point on it in mm.
+  const px = beam.anchorX * pitch + perp.x * (beam.acrossOffset ?? 0);
+  const py = beam.anchorY * pitch + perp.y * (beam.acrossOffset ?? 0);
+
+  let best:
+    | { acrossOffset: number; neighbourId: string; movedMm: number; distance: number; alongMismatchMm: number }
+    | null = null;
+  for (const { beam: other, width } of others) {
+    if (other.id === beam.id || other.layer !== beam.layer) continue;
+    // Parallel either way round: a beam pointing back along the same line is still alongside it.
+    const delta = Math.abs(normalizeDegrees(beamAngleDegrees(other) - mine) % 180);
+    if (Math.min(delta, 180 - delta) > PARALLEL_TOLERANCE_DEG) continue;
+
+    // Everything about the neighbour is measured in WORLD space and then projected onto this
+    // beam's own frame, never read off its `from`/`to` directly. A parallel beam may run the
+    // opposite way along the same line — 45° and -135° are the same line — and its own offsets
+    // are then signed backwards relative to this one. Projecting is indifferent to which way it
+    // points; using its span directly is not, and got these pairs exactly one run-length wrong.
+    const otherDir = beamDirection(other);
+    const otherPerp = { x: -otherDir.y, y: otherDir.x };
+    const otherBody = beamBodySpanStuds(other, pitch);
+    const otherShift = (other.alongOffset ?? 0) / pitch;
+    const otherAcross = (other.acrossOffset ?? 0) / pitch;
+    const otherPoint = (alongStuds: number) => ({
+      x: (other.anchorX + otherDir.x * (alongStuds + otherShift) + otherPerp.x * otherAcross) * pitch,
+      y: (other.anchorY + otherDir.y * (alongStuds + otherShift) + otherPerp.y * otherAcross) * pitch,
+    });
+    const project = (p: { x: number; y: number }) => ({
+      along: (p.x - px) * dir.x + (p.y - py) * dir.y,
+      across: (p.x - px) * perp.x + (p.y - py) * perp.y,
+    });
+
+    const theirEndA = project(otherPoint(otherBody.from));
+    const theirEndB = project(otherPoint(otherBody.to));
+    const sideways = (theirEndA.across + theirEndB.across) / 2;
+    const theirFrom = Math.min(theirEndA.along, theirEndB.along);
+    const theirTo = Math.max(theirEndA.along, theirEndB.along);
+    const myFrom = body.from * pitch + (beam.alongOffset ?? 0);
+    const myTo = body.to * pitch + (beam.alongOffset ?? 0);
+    if (Math.min(myTo, theirTo) < Math.max(myFrom, theirFrom) - pitch) continue;
+
+    // Where the beam's centreline has to end up, measured from where it is now. The nearest whole
+    // lattice step that still clears both beams' widths — never a fraction of one, which is what
+    // would take their holes off the grid.
+    const clearance = (beamWidth + width) / 2;
+    const steps = Math.max(1, Math.ceil((clearance - 1e-6) / pitch));
+    const target = fit === "inline" ? sideways : sideways - Math.sign(sideways || 1) * steps * pitch;
+    const acrossOffset = (beam.acrossOffset ?? 0) + target;
+    const distance = Math.abs(sideways);
+
+    // Phase of the two hole patterns along the run, brought into (-pitch/2, pitch/2].
+    const myHole0 = beamHoleOffsetStuds(beam, 0, pitch) * pitch + (beam.alongOffset ?? 0);
+    const theirHole0 = project(otherPoint(beamHoleOffsetStuds(other, 0, pitch))).along;
+    let phase = (theirHole0 - myHole0) % pitch;
+    if (phase > pitch / 2) phase -= pitch;
+    if (phase < -pitch / 2) phase += pitch;
+
+    // Being in step is not the same as being alongside: two beams a whole number of hole-spacings
+    // apart along the run are in step and still staggered like brickwork, which is not what "sit
+    // alongside" means. So the shift is the one that centres this beam on its neighbour, snapped
+    // to the nearest whole hole-spacing away from that — holes lining up is the constraint, and
+    // centring is only the preference.
+    const centring = (theirFrom + theirTo) / 2 - (myFrom + myTo) / 2;
+    const alongShift = phase + pitch * Math.round((centring - phase) / pitch);
+
+    if (!best || distance < best.distance) {
+      best = {
+        acrossOffset,
+        neighbourId: other.id,
+        movedMm: target,
+        distance,
+        alongMismatchMm: Math.abs(alongShift) < 1e-6 ? 0 : alongShift,
+      };
+    }
+  }
+  if (!best) return null;
+  const { acrossOffset, neighbourId, movedMm, alongMismatchMm } = best;
+  // Both halves of the fit: across onto the neighbouring lattice line, and along by whatever the
+  // hole patterns were out of step, so the two beams' holes end up on one perpendicular.
+  const alongOffset = (beam.alongOffset ?? 0) + alongMismatchMm;
+  return { acrossOffset, alongOffset, neighbourId, movedMm, alongMismatchMm };
+}
+
+/**
+ * For each end of `beam`, which side another beam is running alongside it — +1 toward the beam's
+ * left (its `+perp`), -1 toward its right, 0 for an end with nothing beside it.
+ *
+ * This is what tells a rounded end which half of its cap is wrong. A liftarm's end is a half-disc
+ * about its end hole, and where a second beam runs alongside, the half of that disc facing the
+ * neighbour curves AWAY from it — leaving a notch between two curves exactly where the pair should
+ * read as one flat end. Squaring the whole end throws away the outer half of the radius too, which
+ * is the half that should stay. So the answer is per SIDE, not per end: round outside, square where
+ * they join.
+ */
+export function beamEndSideJoins(
+  beam: AngledBeam,
+  others: readonly { beam: AngledBeam; width: number }[],
+  pitch: number = STUD_PITCH,
+): { start: number; end: number } {
+  const dir = beamDirection(beam);
+  const perp = { x: -dir.y, y: dir.x };
+  const mine = beamAngleDegrees(beam);
+  const body = beamBodySpanStuds(beam, pitch);
+  const shift = beam.alongOffset ?? 0;
+  const px = beam.anchorX * pitch + perp.x * (beam.acrossOffset ?? 0);
+  const py = beam.anchorY * pitch + perp.y * (beam.acrossOffset ?? 0);
+  // How far off a whole lattice step the two centrelines may be and still count as alongside. A
+  // beam sat by "side by side" is exact; this only has to tolerate a hand-typed offset.
+  const SIDE_TOLERANCE = 0.5;
+
+  const sideAt = (alongMm: number): number => {
+    for (const { beam: other } of others) {
+      if (other.id === beam.id || other.layer !== beam.layer) continue;
+      const delta = Math.abs(normalizeDegrees(beamAngleDegrees(other) - mine) % 180);
+      if (Math.min(delta, 180 - delta) > PARALLEL_TOLERANCE_DEG) continue;
+
+      // Measured in WORLD space and projected onto this beam's frame, never read off the
+      // neighbour's own span: a parallel beam may run the opposite way along the same line (45°
+      // and -135° are one line), and its from/to and offsets are then signed backwards. Reading
+      // them directly made the fill appear on one pairing and not on its mirror image.
+      const otherDir = beamDirection(other);
+      const otherPerp = { x: -otherDir.y, y: otherDir.x };
+      const otherBody = beamBodySpanStuds(other, pitch);
+      const otherShift = (other.alongOffset ?? 0) / pitch;
+      const otherAcross = (other.acrossOffset ?? 0) / pitch;
+      const project = (alongStuds: number) => {
+        const wx =
+          (other.anchorX + otherDir.x * (alongStuds + otherShift) + otherPerp.x * otherAcross) * pitch;
+        const wy =
+          (other.anchorY + otherDir.y * (alongStuds + otherShift) + otherPerp.y * otherAcross) * pitch;
+        return {
+          along: (wx - px) * dir.x + (wy - py) * dir.y,
+          across: (wx - px) * perp.x + (wy - py) * perp.y,
+        };
+      };
+      const endA = project(otherBody.from);
+      const endB = project(otherBody.to);
+      const sideways = (endA.across + endB.across) / 2;
+      if (Math.abs(Math.abs(sideways) - pitch) > SIDE_TOLERANCE) continue;
+
+      // Does the neighbour's own body actually reach this end? A beam alongside the far half of
+      // this one says nothing about the shape of this end.
+      const from = Math.min(endA.along, endB.along);
+      const to = Math.max(endA.along, endB.along);
+      if (alongMm < from - 1e-6 || alongMm > to + 1e-6) continue;
+      return Math.sign(sideways);
+    }
+    return 0;
+  };
+
+  return {
+    start: sideAt(body.from * pitch + shift),
+    end: sideAt(body.to * pitch + shift),
+  };
 }
